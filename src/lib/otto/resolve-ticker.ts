@@ -91,7 +91,17 @@ export async function resolveTickerByFuzzyName(text: string): Promise<ResolvedTi
       .toLowerCase()
       .replace(/[^a-z0-9\s]/g, "")
       .split(/\s+/)
-      .filter((w) => w.length > 2 && !["inc", "corp", "ltd", "the", "company", "group"].includes(w));
+      .filter(
+        (w) =>
+          w.length > 2 &&
+          !["inc", "corp", "ltd", "the", "company", "group"].includes(w) &&
+          // A bare number ("100", "500", "2000") is common in fund/index
+          // names (Nasdaq 100, S&P 500, Russell 2000) but far too generic to
+          // signal a real company mention — confirmed live: a follow-up
+          // question containing "not 100 what analysts say" fuzzy-matched
+          // "Nuveen Nasdaq 100 Dynamic Overwrite Fund" purely off the digits.
+          !/^\d+$/.test(w)
+      );
 
     if (nameWords.some((w) => lowerText.includes(w))) return result;
   }

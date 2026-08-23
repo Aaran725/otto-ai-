@@ -132,7 +132,11 @@ export async function searchSecUniverseByName(query: string): Promise<UniverseEn
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, "")
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !NAME_SEARCH_STOPWORDS.has(w));
+    // A bare number ("100", "500", "2000") is common in fund/index names
+    // (Nasdaq 100, S&P 500, Russell 2000) but far too generic on its own to
+    // signal a real company mention — same class of bug as the "any rocket
+    // stocks?" -> Wells Fargo & Company misfire this filter already guards.
+    .filter((w) => w.length > 2 && !NAME_SEARCH_STOPWORDS.has(w) && !/^\d+$/.test(w));
   if (queryWords.length === 0) return null;
 
   let best: UniverseEntry | null = null;
