@@ -197,13 +197,20 @@ export function ChatApp() {
           </button>
           <div className="h-3.5 w-px bg-otto-border" />
           {user ? (
-            <button
-              onClick={() => signOut()}
-              title={user.email ?? undefined}
-              className="otto-text-caption rounded-full px-3 py-1 text-otto-text-muted transition-colors hover:text-otto-text"
-            >
-              Sign out
-            </button>
+            <div className="flex items-center gap-2 pl-3">
+              <span
+                className="otto-text-caption max-w-[160px] truncate text-otto-text-muted"
+                title={user.email ?? undefined}
+              >
+                {user.email}
+              </span>
+              <button
+                onClick={() => signOut()}
+                className="otto-text-caption rounded-full px-3 py-1 text-otto-text-faint transition-colors hover:text-otto-bear"
+              >
+                Sign out
+              </button>
+            </div>
           ) : (
             <button
               onClick={() => setAuthOpen(true)}
