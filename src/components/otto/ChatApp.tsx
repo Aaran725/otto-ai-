@@ -227,8 +227,16 @@ export function ChatApp() {
           )}
         </div>
       </div>
-      {isEmpty ? (
+      {isEmpty && authLoading ? null : isEmpty && !user ? (
         <LandingHero onStart={() => inputRef.current?.focus()} onExample={(text) => send(text)} />
+      ) : isEmpty && user ? (
+        <div className="flex h-full flex-col items-center justify-center px-6 pb-24 text-center">
+          <span className="otto-text-label mb-3 block tracking-[0.3em] text-otto-gold">Otto AI</span>
+          <h1 className="otto-text-display text-otto-text">Welcome back.</h1>
+          <p className="otto-text-body mt-3 max-w-sm text-otto-text-muted">
+            Ask about any ticker, or check your watchlist above.
+          </p>
+        </div>
       ) : (
         <div
           ref={scrollRef}
