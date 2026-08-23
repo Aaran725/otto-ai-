@@ -15,6 +15,7 @@ import { fetchInsiderClusterFeed, type InsiderClusterEntry } from "./insider-fee
 import { fetchRiskFactorExcerpt } from "./sec-edgar";
 import { fetchMacroContext } from "./fred";
 import { fetchPeerValuation } from "./peers";
+import { fetchYahooPriceTarget } from "./yahoo";
 import type { ProgressFn } from "./chat-types";
 import type { ScreenQueryRequirements } from "./screen-query";
 
@@ -29,6 +30,7 @@ export interface ScreenerCandidate {
   thinCoverage: boolean; // ranked without real ratios/keyMetrics data behind it
   insiderActivity?: InsiderActivity; // real Form 4 signal, only checked on semifinalists
   filingNote?: string; // real excerpt from the company's own 10-K, only fetched for the final 5
+  forecastUpsidePct?: number; // real analyst-consensus % upside to target price, only checked on semifinalists
 }
 
 /** Keyword classification — deliberately simple/cheap, no LLM call needed
@@ -420,7 +422,8 @@ function scoreCandidate(intent: ScreenIntent, sf: OttoSnowflakeScores, weights: 
 function buildKeyStat(
   intent: ScreenIntent,
   data: { ratios: FmpRatios | null; keyMetrics: FmpKeyMetrics | null; changePercentage: number },
-  sf: OttoSnowflakeScores
+  sf: OttoSnowflakeScores,
+  forecastUpsidePct?: number
 ): string {
   const pe = data.ratios?.priceToEarningsRatio;
   const roic = data.keyMetrics?.returnOnInvestedCapital;
@@ -430,7 +433,13 @@ function buildKeyStat(
         ? `P/E ${pe.toFixed(1)}x · Valuation ${sf.valuation.score}/6`
         : `Valuation ${sf.valuation.score}/6`;
     case "momentum":
-      return `Momentum ${sf.momentum.score}/6 · ${data.changePercentage >= 0 ? "+" : ""}${data.changePercentage.toFixed(1)}% today`;
+      // Real analyst-consensus target upside — "rocket stock" means real
+      // expected forward return over the next year, not just today's move —
+      // shown once it's known (semifinalist stage); the initial wide-pool
+      // pass still shows today's move since target data isn't fetched yet.
+      return forecastUpsidePct !== undefined
+        ? `${forecastUpsidePct >= 0 ? "+" : ""}${forecastUpsidePct.toFixed(0)}% to analyst target · Momentum ${sf.momentum.score}/6`
+        : `Momentum ${sf.momentum.score}/6 · ${data.changePercentage >= 0 ? "+" : ""}${data.changePercentage.toFixed(1)}% today`;
     case "quality":
       return roic !== undefined
         ? `ROIC ${(roic * 100).toFixed(1)}% · Health ${sf.financialHealth.score}/6`
@@ -580,7 +589,7 @@ export async function runScreener(
     const sectorPercentileBySymbol = new Map<string, number>();
 
     const withInsider = await mapWithConcurrency(semifinalists, 4, async (candidate) => {
-      const [activity, trend, fundamentals, financialsTrend, snap] = await Promise.all([
+      const [activity, trend, fundamentals, financialsTrend, snap, priceTarget] = await Promise.all([
         fetchInsiderActivity(candidate.symbol).catch(() => null),
         fetchFinnhubRatingTrend(candidate.symbol).catch(() => null),
         fetchFinnhubFundamentals(candidate.symbol).catch(() => null),
@@ -591,6 +600,12 @@ export async function runScreener(
         // the final cut to 5.
         fetchFinnhubFinancialsTrend(candidate.symbol).catch(() => null),
         getSymbolSnapshot(candidate.symbol),
+        // Real analyst-consensus target price — "rocket stock" means real
+        // expected forward return over the next year, not just today's
+        // move or trailing trend, so this is the primary signal for the
+        // momentum/"rocket" screen specifically (see FORECAST_UPSIDE_NUDGE
+        // below), not just a minor tiebreaker like the others here.
+        fetchYahooPriceTarget(candidate.symbol).catch(() => null),
       ]);
       if (trend) ratingTrendBySymbol.set(candidate.symbol, trend);
       const pe = fundamentals?.ratios?.priceToEarningsRatio;
@@ -598,6 +613,8 @@ export async function runScreener(
         const peerValuation = await fetchPeerValuation(candidate.symbol, pe).catch(() => null);
         if (peerValuation) sectorPercentileBySymbol.set(candidate.symbol, peerValuation.percentile);
       }
+      const forecastUpsidePct =
+        priceTarget && candidate.price > 0 ? ((priceTarget.targetConsensus - candidate.price) / candidate.price) * 100 : undefined;
 
       let enriched = candidate;
       if (financialsTrend && fundamentals) {
@@ -628,10 +645,27 @@ export async function runScreener(
         enriched = {
           ...candidate,
           compositeScore: scoreCandidate(intent, sf, weights),
-          keyStat: buildKeyStat(intent, { ratios: fundamentals.ratios, keyMetrics: fundamentals.keyMetrics, changePercentage: enrichedBundle.quote.changePercentage }, sf),
+          keyStat: buildKeyStat(
+            intent,
+            { ratios: fundamentals.ratios, keyMetrics: fundamentals.keyMetrics, changePercentage: enrichedBundle.quote.changePercentage },
+            sf,
+            forecastUpsidePct
+          ),
           thinCoverage: fundamentalsChecksRun <= 3,
         };
+      } else if (forecastUpsidePct !== undefined && intent === "momentum") {
+        // financialsTrend missing but we still have the target price —
+        // swap in the upside-to-target display without recomputing the
+        // Snowflake score (that needs the fuller bundle from the branch
+        // above, which didn't resolve here).
+        const momentumScoreMatch = candidate.keyStat.match(/Momentum (\d\/6)/);
+        const momentumScore = momentumScoreMatch ? momentumScoreMatch[1] : "?/6";
+        enriched = {
+          ...candidate,
+          keyStat: `${forecastUpsidePct >= 0 ? "+" : ""}${forecastUpsidePct.toFixed(0)}% to analyst target · Momentum ${momentumScore}`,
+        };
       }
+      if (forecastUpsidePct !== undefined) enriched = { ...enriched, forecastUpsidePct };
 
       return activity ? { ...enriched, insiderActivity: activity } : enriched;
     });
@@ -640,9 +674,15 @@ export async function runScreener(
     // fundamentals score outright — compositeScore itself stays a pure
     // reflection of the Snowflake data so it remains comparable across
     // runs; these only decide ordering among near-tied semifinalists.
+    // FORECAST_UPSIDE_NUDGE is deliberately the largest of the bunch for the
+    // momentum/"rocket" screen — real forward analyst-target upside is what
+    // "might go boom up in a year" actually means, not just trailing price
+    // trend (confirmed by user feedback: a stock already near its analyst
+    // target, however strong its recent trend, isn't a "rocket").
     const INSIDER_NUDGE = 4;
     const RATING_TREND_NUDGE = 3;
     const SECTOR_NUDGE_MAX = 4; // scaled by percentile: cheapest-vs-peers = full nudge, priciest = full penalty
+    const FORECAST_UPSIDE_NUDGE_MAX = intent === "momentum" ? 16 : 6; // scaled by upside%, capped at +/-50%
     function rankKey(c: ScreenerCandidate): number {
       let key = c.compositeScore + clusterNudgeFor(c.symbol);
       if (c.insiderActivity?.direction === "buying") key += INSIDER_NUDGE;
@@ -652,6 +692,10 @@ export async function runScreener(
       else if (trend?.direction === "worsening") key -= RATING_TREND_NUDGE;
       const percentile = sectorPercentileBySymbol.get(c.symbol);
       if (percentile !== undefined) key += ((50 - percentile) / 50) * SECTOR_NUDGE_MAX;
+      if (c.forecastUpsidePct !== undefined) {
+        const clamped = Math.max(-50, Math.min(50, c.forecastUpsidePct));
+        key += (clamped / 50) * FORECAST_UPSIDE_NUDGE_MAX;
+      }
       return key;
     }
 
