@@ -190,8 +190,43 @@ export interface FinnhubRatingCounts {
  * blocked for a ticker — the most recent month's counts become a
  * ratings-only "Street" consensus (no $ price targets, Finnhub's
  * price-target endpoint is paid-only). */
+async function fetchFinnhubRecommendationHistory(symbol: string): Promise<FinnhubRecommendationEntry[] | null> {
+  return finnhubGet<FinnhubRecommendationEntry[]>(`/stock/recommendation?symbol=${encodeURIComponent(symbol)}`);
+}
+
+/** -1 (strongSell) .. +1 (strongBuy), weighted by analyst count so a
+ * 3-analyst stock isn't as noisy-swingy as it would be unweighted. */
+function bullScore(e: FinnhubRecommendationEntry): number | null {
+  const total = e.strongBuy + e.buy + e.hold + e.sell + e.strongSell;
+  if (total === 0) return null;
+  return (e.strongBuy * 2 + e.buy * 1 - e.sell * 1 - e.strongSell * 2) / (total * 2);
+}
+
+/**
+ * "Are analysts getting more or less bullish" — Finnhub's free
+ * /stock/recommendation already returns several months of history (used
+ * elsewhere only for the latest month), so this is a real factor at zero
+ * extra API cost, not a new fetch. Compares the latest period against
+ * ~3 months back rather than month-over-month, since a single month's
+ * swing is noisy but a real quarter-over-quarter drift is a meaningful
+ * signal free EPS-revision data (paid-only on this plan) can't give us.
+ */
+export async function fetchFinnhubRatingTrend(symbol: string): Promise<{ direction: "improving" | "worsening" | "flat"; delta: number } | null> {
+  const history = await fetchFinnhubRecommendationHistory(symbol);
+  if (!history || history.length < 2) return null;
+
+  const latest = bullScore(history[0]);
+  const priorIndex = Math.min(3, history.length - 1);
+  const prior = bullScore(history[priorIndex]);
+  if (latest === null || prior === null) return null;
+
+  const delta = latest - prior;
+  const direction = delta > 0.05 ? "improving" : delta < -0.05 ? "worsening" : "flat";
+  return { direction, delta };
+}
+
 export async function fetchFinnhubRecommendation(symbol: string): Promise<FinnhubRatingCounts | null> {
-  const data = await finnhubGet<FinnhubRecommendationEntry[]>(`/stock/recommendation?symbol=${encodeURIComponent(symbol)}`);
+  const data = await fetchFinnhubRecommendationHistory(symbol);
   if (!data || data.length === 0) return null;
   const latest = data[0]; // API returns newest period first
   return {

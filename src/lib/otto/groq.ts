@@ -183,7 +183,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
     const snowflakeScores = computeSnowflake(bundle);
     const forecastTargets = computeForecastTargets(bundle);
 
-    onProgress?.("Reading filings, peers, insider & earnings data…");
+    onProgress?.("Checking SEC filings, sector peers, insider Form 4s & earnings history…");
     // Enrichment only — never let a slow/failed fetch block the analysis.
     const [streetConsensus, filingExcerpt, macro, peerValuation, earnings, shortInterest, insiderActivity] = await Promise.all([
       computeStreetConsensus(bundle, bundle.symbol).catch(() => null),
@@ -194,6 +194,16 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       fetchShortInterest(bundle.symbol).catch(() => null),
       fetchInsiderActivity(bundle.symbol).catch(() => null),
     ]);
+
+    // A brief "here's what I actually found" reveal before moving on to
+    // writing the analysis — real values only, each clause added only when
+    // that fetch genuinely succeeded, never a filled-in placeholder.
+    const found: string[] = [];
+    if (insiderActivity) found.push(`insiders ${insiderActivity.direction}`);
+    if (peerValuation) found.push(`${peerValuation.peerCount} sector peers`);
+    if (earnings) found.push(`${earnings.beatCount}/${earnings.beatCount + earnings.missCount} recent earnings beats`);
+    if (shortInterest) found.push(`${shortInterest.daysToCover.toFixed(1)}d to cover short interest`);
+    if (found.length > 0) onProgress?.(`Found: ${found.join(" · ")}`);
 
     const metrics = computeMetrics(bundle, peerValuation, earnings, shortInterest);
     const rateSensitivity = computeRateSensitivity(bundle.keyMetrics?.freeCashFlowYield, macro?.treasury10Y);

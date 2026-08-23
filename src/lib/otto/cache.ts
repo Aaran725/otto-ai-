@@ -42,6 +42,7 @@ const globalForCache = globalThis as unknown as {
   __ottoScreenerCache?: TtlCache<unknown>;
   __ottoUniverseCache?: TtlCache<unknown>;
   __ottoInsiderCache?: TtlCache<unknown>;
+  __ottoInsiderFeedCache?: TtlCache<unknown>;
   __ottoPeerCache?: TtlCache<unknown>;
   __ottoEarningsCache?: TtlCache<unknown>;
   __ottoShortInterestCache?: TtlCache<unknown>;
@@ -92,6 +93,15 @@ export function getInsiderCache<T>(): TtlCache<T> {
   // SEC's servers on repeated screens without going stale within a session.
   globalForCache.__ottoInsiderCache ??= new TtlCache(12 * 60 * 60 * 1000); // 12 h
   return globalForCache.__ottoInsiderCache as TtlCache<T>;
+}
+
+export function getInsiderFeedCache<T>(): TtlCache<T> {
+  // The market-wide Form 4 feed is genuinely live (new filings land
+  // continuously), unlike the 12h-cached per-company insider check —
+  // refresh every 30 min so a screen doesn't go stale within a session but
+  // repeated requests in a short window still share one ~100-filing scan.
+  globalForCache.__ottoInsiderFeedCache ??= new TtlCache(30 * 60 * 1000); // 30 min
+  return globalForCache.__ottoInsiderFeedCache as TtlCache<T>;
 }
 
 export function getEarningsCache<T>(): TtlCache<T> {

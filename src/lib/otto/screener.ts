@@ -1,11 +1,14 @@
 import { fetchMostActive, fetchBiggestGainers, type FmpMarketMover, type StockBundle } from "./fmp";
-import { fetchFinnhubQuote, fetchFinnhubFundamentals, fetchFinnhubProfile2 } from "./finnhub";
+import { fetchFinnhubQuote, fetchFinnhubFundamentals, fetchFinnhubProfile2, fetchFinnhubRatingTrend } from "./finnhub";
 import { fetchSecUniverse, fetchCikForSymbol, type UniverseEntry } from "./sec-universe";
 import { computeSnowflake, type OttoSnowflakeScores } from "./snowflake";
 import { getScreenerCache } from "./cache";
 import { mapWithConcurrency } from "./batch";
 import { fetchInsiderActivity, type InsiderActivity } from "./insider";
+import { fetchInsiderClusterFeed, type InsiderClusterEntry } from "./insider-feed";
 import { fetchRiskFactorExcerpt } from "./sec-edgar";
+import { fetchMacroContext } from "./fred";
+import { fetchPeerValuation } from "./peers";
 
 export type ScreenIntent = "undervalued" | "momentum" | "best" | "quality" | "avoid";
 
@@ -219,6 +222,16 @@ async function buildFinnhubBundle(symbol: string): Promise<StockBundle | null> {
 }
 
 type SnowflakeAxis = keyof OttoSnowflakeScores;
+// Base weights, chosen to mirror real factor-investing logic rather than
+// arbitrary points: "undervalued" leans on valuation but still requires
+// some quality/health (a cheap stock with a broken balance sheet isn't a
+// value play, it's a value trap) — the classic quality+value combination
+// factor research favors over value alone. "momentum" leans on momentum
+// and growth since price trend and revenue trend tend to move together.
+// "quality" doubles up quality+financialHealth (the two axes that most
+// directly answer "is this a well-run, durable business"). "best"/"avoid"
+// stay balanced across all five since they're asking a general question,
+// not screening for one specific factor.
 const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
   momentum: { momentum: 2, growth: 1.5, quality: 0.5, valuation: 0.3, financialHealth: 0.5 },
@@ -231,8 +244,37 @@ const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>>
 
 const ASCENDING_INTENTS = new Set<ScreenIntent>(["avoid"]);
 
-function scoreCandidate(intent: ScreenIntent, sf: OttoSnowflakeScores): number {
-  const weights = AXIS_WEIGHTS[intent];
+/**
+ * Tilts the base weights by the current macro regime rather than scoring
+ * every environment the same way. Real basis: when the Fed funds rate is
+ * elevated, capital is expensive — speculative/unprofitable growth names
+ * get punished hardest (their cash flows are further out, so they discount
+ * worse) while cash-generative, low-leverage names hold up — so quality
+ * and financial-health weight goes up, growth/momentum weight comes down.
+ * When rates are low/easing, that logic reverses: cheap capital favors
+ * growth and risk-taking. Between ~3% and ~4.5% Fed funds, weights stay at
+ * the base (no strong regime signal either way).
+ */
+function applyRegimeTilt(
+  weights: Partial<Record<SnowflakeAxis, number>>,
+  macro: { fedFundsRate: number } | null
+): Partial<Record<SnowflakeAxis, number>> {
+  if (!macro) return weights;
+  let tilt: Partial<Record<SnowflakeAxis, number>> | null = null;
+  if (macro.fedFundsRate >= 4.5) {
+    tilt = { quality: 1.25, financialHealth: 1.25, growth: 0.85, momentum: 0.9 };
+  } else if (macro.fedFundsRate <= 3) {
+    tilt = { growth: 1.2, momentum: 1.15, quality: 0.9 };
+  }
+  if (!tilt) return weights;
+  const adjusted: Partial<Record<SnowflakeAxis, number>> = { ...weights };
+  for (const axis of Object.keys(tilt) as SnowflakeAxis[]) {
+    if (adjusted[axis] !== undefined) adjusted[axis] = adjusted[axis]! * tilt[axis]!;
+  }
+  return adjusted;
+}
+
+function scoreCandidate(intent: ScreenIntent, sf: OttoSnowflakeScores, weights: Partial<Record<SnowflakeAxis, number>> = AXIS_WEIGHTS[intent]): number {
   const axes = Object.keys(weights) as SnowflakeAxis[];
   let weightedSum = 0;
   let weightTotal = 0;
@@ -290,8 +332,31 @@ export async function runScreener(
   // On a cache hit nothing below runs, so no progress events fire — the
   // scan really is instant then, not staged for show.
   return getScreenerCache<ScreenerCandidate[]>().getOrSet(cacheKey, async () => {
-    const pool = await sourceCandidates(intent, theme, capFilter);
+    // Macro (for regime-tilted weights) and the market-wide insider-cluster
+    // feed are both ticker-agnostic — fetched once per scan, in parallel
+    // with sourcing the pool, not once per candidate.
+    const [pool, macro, clusterFeed] = await Promise.all([
+      sourceCandidates(intent, theme, capFilter),
+      fetchMacroContext().catch(() => null),
+      fetchInsiderClusterFeed().catch(() => [] as InsiderClusterEntry[]),
+    ]);
     onProgress?.(`Scanning ${pool.length} tickers…`);
+
+    const weights = applyRegimeTilt(AXIS_WEIGHTS[intent], macro);
+    const clusterBySymbol = new Map(clusterFeed.map((e) => [e.symbol, e]));
+
+    // Cheap (already in memory, no extra fetch) real-money signal applied
+    // to the WHOLE pool, not just semifinalists — a stock with a live
+    // insider-buying cluster can win a spot in contention it wouldn't have
+    // gotten on fundamentals alone, the same way a real desk would flag it.
+    const CLUSTER_NUDGE = 3;
+    function clusterNudgeFor(symbol: string): number {
+      const entry = clusterBySymbol.get(symbol);
+      if (!entry) return 0;
+      if (entry.buys > entry.sells && entry.netShares > 0) return CLUSTER_NUDGE;
+      if (entry.sells > entry.buys && entry.netShares < 0) return -CLUSTER_NUDGE;
+      return 0;
+    }
 
     const scored = await mapWithConcurrency(pool, SCORING_CONCURRENCY, async (c): Promise<ScreenerCandidate | null> => {
       try {
@@ -311,7 +376,7 @@ export async function runScreener(
           symbol: c.symbol,
           companyName: c.companyName,
           price: bundle.quote.price,
-          compositeScore: scoreCandidate(intent, sf),
+          compositeScore: scoreCandidate(intent, sf, weights),
           keyStat: buildKeyStat(intent, bundle, sf),
           // Flagged rather than hidden so a data-starved spike never looks
           // equivalent to a fully-scored pick (the "rocket stock" problem).
@@ -323,41 +388,65 @@ export async function runScreener(
     });
 
     const ascending = ASCENDING_INTENTS.has(intent);
+    function preRankKey(c: ScreenerCandidate): number {
+      return c.compositeScore + clusterNudgeFor(c.symbol);
+    }
     const ranked = scored
       .filter((s): s is ScreenerCandidate => s !== null)
       .sort((a, b) => {
         // Fully-scored candidates always outrank thin-coverage ones,
         // regardless of raw composite score — see the comment above.
         if (a.thinCoverage !== b.thinCoverage) return a.thinCoverage ? 1 : -1;
-        return ascending ? a.compositeScore - b.compositeScore : b.compositeScore - a.compositeScore;
+        return ascending ? preRankKey(a) - preRankKey(b) : preRankKey(b) - preRankKey(a);
       });
     onProgress?.(`${ranked.length} cleared fundamentals — narrowing to the leading candidates…`);
 
-    // Stage 3: the expensive real-money check — free SEC Form 4 data on
-    // whether insiders have actually bought or sold on the open market in
-    // the last 90 days. Only run on the candidates actually in contention
-    // for the final 5, so cost stays bounded even as the funnel above
-    // widens to hundreds of names.
+    // Stage 3: the expensive real-money checks — per-company Form 4 detail
+    // (for the display data, distinct from the market-wide cluster feed
+    // above), analyst-rating-trend direction, and this stock's P/E
+    // percentile against its real sector peers. Only run on the candidates
+    // actually in contention for the final 5, so cost stays bounded even as
+    // the funnel above widens to hundreds of names.
     const SEMIFINALIST_COUNT = 12;
     const semifinalists = ranked.slice(0, SEMIFINALIST_COUNT);
     const rest = ranked.slice(SEMIFINALIST_COUNT);
-    onProgress?.(`Checking insider trading activity on ${semifinalists.length} finalists…`);
+    onProgress?.(`Cross-checking insider trades, analyst tone, and sector valuation on ${semifinalists.length} finalists…`);
+
+    const ratingTrendBySymbol = new Map<string, { direction: "improving" | "worsening" | "flat"; delta: number }>();
+    const sectorPercentileBySymbol = new Map<string, number>();
 
     const withInsider = await mapWithConcurrency(semifinalists, 4, async (candidate) => {
-      const activity = await fetchInsiderActivity(candidate.symbol).catch(() => null);
+      const [activity, trend, fundamentals] = await Promise.all([
+        fetchInsiderActivity(candidate.symbol).catch(() => null),
+        fetchFinnhubRatingTrend(candidate.symbol).catch(() => null),
+        fetchFinnhubFundamentals(candidate.symbol).catch(() => null),
+      ]);
+      if (trend) ratingTrendBySymbol.set(candidate.symbol, trend);
+      const pe = fundamentals?.ratios?.priceToEarningsRatio;
+      if (pe !== undefined) {
+        const peerValuation = await fetchPeerValuation(candidate.symbol, pe).catch(() => null);
+        if (peerValuation) sectorPercentileBySymbol.set(candidate.symbol, peerValuation.percentile);
+      }
       return activity ? { ...candidate, insiderActivity: activity } : candidate;
     });
 
-    // Real insider buying/selling nudges the final ranking rather than
-    // overriding the fundamentals score outright — compositeScore itself
-    // stays a pure reflection of the Snowflake data so it remains
-    // comparable across runs; this only decides ordering among near-tied
-    // semifinalists.
+    // Real signals nudge the final ranking rather than overriding the
+    // fundamentals score outright — compositeScore itself stays a pure
+    // reflection of the Snowflake data so it remains comparable across
+    // runs; these only decide ordering among near-tied semifinalists.
     const INSIDER_NUDGE = 4;
+    const RATING_TREND_NUDGE = 3;
+    const SECTOR_NUDGE_MAX = 4; // scaled by percentile: cheapest-vs-peers = full nudge, priciest = full penalty
     function rankKey(c: ScreenerCandidate): number {
-      if (c.insiderActivity?.direction === "buying") return c.compositeScore + INSIDER_NUDGE;
-      if (c.insiderActivity?.direction === "selling") return c.compositeScore - INSIDER_NUDGE;
-      return c.compositeScore;
+      let key = c.compositeScore + clusterNudgeFor(c.symbol);
+      if (c.insiderActivity?.direction === "buying") key += INSIDER_NUDGE;
+      else if (c.insiderActivity?.direction === "selling") key -= INSIDER_NUDGE;
+      const trend = ratingTrendBySymbol.get(c.symbol);
+      if (trend?.direction === "improving") key += RATING_TREND_NUDGE;
+      else if (trend?.direction === "worsening") key -= RATING_TREND_NUDGE;
+      const percentile = sectorPercentileBySymbol.get(c.symbol);
+      if (percentile !== undefined) key += ((50 - percentile) / 50) * SECTOR_NUDGE_MAX;
+      return key;
     }
 
     const finalists = [...withInsider, ...rest]
