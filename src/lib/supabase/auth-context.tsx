@@ -19,15 +19,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const supabase = createClient();
 
-    supabase.auth.getUser().then(({ data }) => {
-      setUser(data.user);
-      setLoading(false);
-    });
+    // getSession() reads the (possibly chunked) session cookie locally —
+    // no network round-trip, so it can't silently hang the way getUser()'s
+    // server verification call could (that was leaving `loading` stuck
+    // true forever on any transient failure, with the sign-in button never
+    // updating even though the session cookie was actually there).
+    supabase.auth
+      .getSession()
+      .then(({ data, error }) => {
+        if (error) console.error("[auth] getSession failed:", error.message);
+        setUser(data.session?.user ?? null);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error("[auth] getSession threw:", err instanceof Error ? err.message : err);
+        setLoading(false);
+      });
 
     // Keeps `user` in sync across sign-in/out and token refresh, including
     // tab-to-tab changes (e.g. signing out in one tab reflects in another).
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
+      setLoading(false);
     });
 
     return () => listener.subscription.unsubscribe();
