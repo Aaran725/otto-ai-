@@ -13,6 +13,7 @@ function getFmpKeys(): string[] {
     process.env.FMP_API_KEY_3,
     process.env.FMP_API_KEY_4,
     process.env.FMP_API_KEY_5,
+    process.env.FMP_API_KEY_6,
   ].filter((k): k is string => Boolean(k));
 }
 

@@ -9,6 +9,7 @@ function getFinnhubKeys(): string[] {
     process.env.FINNHUB_API_KEY_3,
     process.env.FINNHUB_API_KEY_4,
     process.env.FINNHUB_API_KEY_5,
+    process.env.FINNHUB_API_KEY_6,
   ].filter((k): k is string => Boolean(k));
 }
 
