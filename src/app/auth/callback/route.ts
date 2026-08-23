@@ -11,10 +11,17 @@ export async function GET(request: Request) {
 
   if (code) {
     const supabase = await createClient();
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (!error) {
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+    if (error) {
+      console.error("[auth/callback] exchangeCodeForSession failed:", error.message);
+    } else {
+      console.log("[auth/callback] exchange ok, session present:", Boolean(data.session), "user:", data.user?.email);
+    }
+    if (!error && data.session) {
       return NextResponse.redirect(`${origin}${next}`);
     }
+  } else {
+    console.error("[auth/callback] no code param in callback URL");
   }
 
   return NextResponse.redirect(`${origin}/auth/error`);

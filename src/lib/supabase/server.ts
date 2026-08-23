@@ -20,9 +20,13 @@ export async function createClient() {
         setAll(cookiesToSet) {
           try {
             cookiesToSet.forEach(({ name, value, options }) => cookieStore.set(name, value, options));
-          } catch {
-            // Called from a Server Component render — middleware refreshes
-            // the session cookie instead, so this is safe to ignore.
+          } catch (err) {
+            // Expected when called from a Server Component render (cookies
+            // are read-only there) — middleware refreshes the session cookie
+            // instead. Logged rather than fully silent so a *real* failure
+            // (e.g. in a Route Handler, where writes should succeed) is
+            // still visible instead of silently dropping the session.
+            console.error("[supabase/server] cookie setAll failed:", err instanceof Error ? err.message : err);
           }
         },
       },
