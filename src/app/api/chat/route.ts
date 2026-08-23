@@ -14,6 +14,11 @@ import type { ChatRequestBody, ChatStreamEvent, ProgressFn } from "@/lib/otto/ch
  * onProgress callback lands as its own "status" event as it actually
  * happens, so the wait reads as Otto doing real work, not lag.
  */
+// Screener scans widened in the Tier 1 quality pass (deterministic pool +
+// per-symbol caching let a cold scan cover more of the market) — give it
+// headroom above the platform's default function timeout.
+export const maxDuration = 90;
+
 export async function POST(request: Request) {
   const body = (await request.json()) as ChatRequestBody;
   const message = body.message?.trim();

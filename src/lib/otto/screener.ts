@@ -1,8 +1,14 @@
-import { fetchMostActive, fetchBiggestGainers, type FmpMarketMover, type StockBundle } from "./fmp";
-import { fetchFinnhubQuote, fetchFinnhubFundamentals, fetchFinnhubProfile2, fetchFinnhubRatingTrend } from "./finnhub";
+import { fetchMostActive, fetchBiggestGainers, type FmpRatios, type FmpKeyMetrics, type StockBundle } from "./fmp";
+import {
+  fetchFinnhubQuote,
+  fetchFinnhubFundamentals,
+  fetchFinnhubProfile2,
+  fetchFinnhubRatingTrend,
+  fetchFinnhubFinancialsTrend,
+} from "./finnhub";
 import { fetchSecUniverse, fetchCikForSymbol, type UniverseEntry } from "./sec-universe";
 import { computeSnowflake, type OttoSnowflakeScores } from "./snowflake";
-import { getScreenerCache } from "./cache";
+import { getScreenerCache, getSymbolScoreCache } from "./cache";
 import { mapWithConcurrency } from "./batch";
 import { fetchInsiderActivity, type InsiderActivity } from "./insider";
 import { fetchInsiderClusterFeed, type InsiderClusterEntry } from "./insider-feed";
@@ -114,10 +120,28 @@ export function detectCapFilter(message: string): CapFilter | null {
   return null;
 }
 
-function shuffle<T>(arr: T[]): T[] {
+// Deterministic PRNG (mulberry32) seeded with a fixed constant — not
+// Math.random(). A screen's candidate pool is now a *stable, reproducible*
+// draw: the same "extra" slice of the universe every time, so a re-scan
+// after the cache expires surfaces the same ranking unless the underlying
+// market data actually changed, instead of a fresh random sample that could
+// miss a genuinely strong candidate purely by luck of the draw.
+function mulberry32(seed: number) {
+  let state = seed | 0;
+  return function random() {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const POOL_SEED = 20260101;
+
+function seededShuffle<T>(arr: T[]): T[] {
+  const random = mulberry32(POOL_SEED);
   const copy = [...arr];
   for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(random() * (i + 1));
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
   return copy;
@@ -128,16 +152,14 @@ const LEVERAGED_OR_FUND_NAME = /\b(2X|3X|Bull|Bear|Daily|Leveraged|Inverse|ETF|T
 /**
  * Anchors on the most prominent slice of the pool (SEC's universe list is
  * empirically ordered roughly mega-cap-first) so real large/mid-cap quality
- * names are always in the scoring pool, then fills the rest with a random
- * sample of the remainder for "hidden gem" diversity. Previously this whole
- * pool was a single `shuffle().slice(0, 20)` — a pure-random draw from 500
- * names that regularly missed every genuinely strong candidate and let a
- * mediocre score (e.g. 58) "win" simply because nothing better was sampled.
+ * names are always in the scoring pool, then fills the rest with a
+ * deterministically-seeded sample of the remainder for "hidden gem"
+ * diversity — reproducible run to run, unlike a fresh Math.random() draw.
  */
 function buildCandidatePool(companies: UniverseEntry[], size: number): UniverseEntry[] {
   const anchor = companies.slice(0, Math.min(50, companies.length));
   const rest = companies.slice(anchor.length);
-  const extra = shuffle(rest).slice(0, Math.max(size - anchor.length, 0));
+  const extra = seededShuffle(rest).slice(0, Math.max(size - anchor.length, 0));
   return [...anchor, ...extra];
 }
 
@@ -149,13 +171,26 @@ function buildCandidatePool(companies: UniverseEntry[], size: number): UniverseE
 const SCORING_CONCURRENCY = 15;
 const CLASSIFY_CONCURRENCY = 20;
 
+// Below this, a nano-cap "momentum" candidate sourced from the general
+// universe (rather than today's gainers/actives list) is dropped before it
+// even reaches scoring — thinly-traded micro-caps dominate the raw
+// gainers/actives feed with 1-day spikes that don't reflect a real,
+// tradeable trend.
+const MOMENTUM_UNIVERSE_CAP_FLOOR_MILLIONS = 300;
+
 /**
  * "momentum" pulls from FMP's free /biggest-gainers + /most-actives — a
- * real, live market-wide source that's exactly the right signal for that
- * intent. The other three intents pull from SEC's free company_tickers.json
- * (thousands of real tickers, not a fixed shortlist) since FMP has no free
- * valuation/quality filter endpoint (company-screener, batch quote,
- * sp500-constituent, stock-list are all paid-only — confirmed live).
+ * real, live market-wide source, but on its own that only ever catches
+ * *today's* spike (confirmed live: single-day 300%+ moves in thinly-traded
+ * names dominating the list). It's supplemented with a deterministic sample
+ * of the general universe, cap-floored and scored on the same real 13/26-
+ * week trailing returns as everyone else (see snowflake.ts), so a stock
+ * with a genuine sustained multi-week trend has a real shot at the list too
+ * — not just whatever moved most in the last session. The other three
+ * intents pull from SEC's free company_tickers.json (thousands of real
+ * tickers, not a fixed shortlist) since FMP has no free valuation/quality
+ * filter endpoint (company-screener, batch quote, sp500-constituent,
+ * stock-list are all paid-only — confirmed live).
  */
 async function sourceCandidates(
   intent: ScreenIntent,
@@ -163,12 +198,26 @@ async function sourceCandidates(
   capFilter: CapFilter | null = null
 ): Promise<{ symbol: string; companyName: string }[]> {
   if (intent === "momentum") {
-    const [gainers, active] = await Promise.all([fetchBiggestGainers(), fetchMostActive()]);
-    const merged = new Map<string, FmpMarketMover>();
+    const [gainers, active, universe] = await Promise.all([
+      fetchBiggestGainers(),
+      fetchMostActive(),
+      fetchSecUniverse(1000),
+    ]);
+    const merged = new Map<string, { symbol: string; companyName: string }>();
     for (const m of [...gainers, ...active]) {
-      if (m.price >= 5 && !LEVERAGED_OR_FUND_NAME.test(m.name)) merged.set(m.symbol, m);
+      if (m.price >= 5 && !LEVERAGED_OR_FUND_NAME.test(m.name)) merged.set(m.symbol, { symbol: m.symbol, companyName: m.name });
     }
-    return [...merged.values()].slice(0, 15).map((m) => ({ symbol: m.symbol, companyName: m.name }));
+
+    const companies = universe.filter((u) => !LEVERAGED_OR_FUND_NAME.test(u.companyName));
+    const sample = buildCandidatePool(companies, 150);
+    const classified = await mapWithConcurrency(sample, CLASSIFY_CONCURRENCY, async (c) => {
+      if (merged.has(c.symbol)) return null; // already covered via gainers/actives
+      const { marketCapMillions } = await fetchFinnhubProfile2(c.symbol);
+      return marketCapMillions !== null && marketCapMillions >= MOMENTUM_UNIVERSE_CAP_FLOOR_MILLIONS ? c : null;
+    });
+    for (const c of classified) if (c) merged.set(c.symbol, c);
+
+    return [...merged.values()];
   }
 
   const universe = await fetchSecUniverse(1000);
@@ -177,7 +226,10 @@ async function sourceCandidates(
   // Stage 1 of the funnel: hundreds of candidates get a real shot instead
   // of the old 20-80 name sample, now that scoring runs through a bounded
   // worker pool (see SCORING_CONCURRENCY) instead of one giant Promise.all.
-  if (!theme && !capFilter) return buildCandidatePool(companies, 300);
+  // Widened again once per-symbol score caching (getSymbolScoreCache) meant
+  // a symbol scanned by one screen is free the next time any other screen
+  // scans it — the budget that pays for wider coverage.
+  if (!theme && !capFilter) return buildCandidatePool(companies, 450);
 
   // Theme/cap screens need a much wider initial sample since most
   // candidates get filtered out (a 40-ticker sample only turned up 1 AI
@@ -185,7 +237,7 @@ async function sourceCandidates(
   // pool) — one cheap Finnhub profile2 call per candidate (industry +
   // market cap in one shot) decides in/out before spending the heavier
   // quote+metric calls only on actual matches.
-  const sample = buildCandidatePool(companies, capFilter ? 350 : 250);
+  const sample = buildCandidatePool(companies, capFilter ? 500 : 380);
   const classified = await mapWithConcurrency(sample, CLASSIFY_CONCURRENCY, async (c) => {
     const { industry, marketCapMillions } = await fetchFinnhubProfile2(c.symbol);
     if (theme && !(industry && theme.industryMatch.test(industry))) return null;
@@ -214,7 +266,19 @@ async function buildFinnhubBundle(symbol: string): Promise<StockBundle | null> {
 
   return {
     symbol,
-    quote: { symbol, name: symbol, price: quote.price, changePercentage: quote.changePercent, marketCap: 0, currency: "USD" },
+    quote: {
+      symbol,
+      name: symbol,
+      price: quote.price,
+      changePercentage: quote.changePercent,
+      marketCap: 0,
+      currency: "USD",
+      // Real 52-week high/low from the same /stock/metric call — activates
+      // the Snowflake momentum axis's "within 25% of 52-week high" check
+      // with real data instead of leaving it unscoreable.
+      yearHigh: fundamentals?.week52High,
+      yearLow: fundamentals?.week52Low,
+    },
     profile: null,
     ratios: fundamentals?.ratios ?? null,
     keyMetrics: fundamentals?.keyMetrics ?? null,
@@ -224,6 +288,40 @@ async function buildFinnhubBundle(symbol: string): Promise<StockBundle | null> {
     income: [],
     cashFlow: [],
   };
+}
+
+interface SymbolSnapshot {
+  price: number;
+  ratios: FmpRatios | null;
+  keyMetrics: FmpKeyMetrics | null;
+  changePercentage: number;
+  sf: OttoSnowflakeScores;
+  fundamentalsChecksRun: number;
+}
+
+/**
+ * Per-symbol, intent-agnostic snapshot (quote + fundamentals + Snowflake
+ * scores) — cached independently of which screen asked for it, so a symbol
+ * scanned in "best" and then "quality" 10 minutes later is free the second
+ * time (see getSymbolScoreCache). Intent-specific ranking (compositeScore,
+ * keyStat) is derived from this shared snapshot per-screen, not cached here.
+ */
+async function getSymbolSnapshot(symbol: string): Promise<SymbolSnapshot | null> {
+  return getSymbolScoreCache<SymbolSnapshot | null>().getOrSet(symbol, async () => {
+    const bundle = await buildFinnhubBundle(symbol);
+    if (!bundle) return null;
+    const sf = computeSnowflake(bundle);
+    const fundamentalsChecksRun =
+      sf.valuation.checks.length + sf.growth.checks.length + sf.quality.checks.length + sf.financialHealth.checks.length;
+    return {
+      price: bundle.quote.price,
+      ratios: bundle.ratios,
+      keyMetrics: bundle.keyMetrics,
+      changePercentage: bundle.quote.changePercentage,
+      sf,
+      fundamentalsChecksRun,
+    };
+  });
 }
 
 type SnowflakeAxis = keyof OttoSnowflakeScores;
@@ -291,16 +389,20 @@ function scoreCandidate(intent: ScreenIntent, sf: OttoSnowflakeScores, weights: 
   return Math.round((weightedSum / weightTotal) * 100);
 }
 
-function buildKeyStat(intent: ScreenIntent, bundle: StockBundle, sf: OttoSnowflakeScores): string {
-  const pe = bundle.ratios?.priceToEarningsRatio;
-  const roic = bundle.keyMetrics?.returnOnInvestedCapital;
+function buildKeyStat(
+  intent: ScreenIntent,
+  data: { ratios: FmpRatios | null; keyMetrics: FmpKeyMetrics | null; changePercentage: number },
+  sf: OttoSnowflakeScores
+): string {
+  const pe = data.ratios?.priceToEarningsRatio;
+  const roic = data.keyMetrics?.returnOnInvestedCapital;
   switch (intent) {
     case "undervalued":
       return pe !== undefined
         ? `P/E ${pe.toFixed(1)}x · Valuation ${sf.valuation.score}/6`
         : `Valuation ${sf.valuation.score}/6`;
     case "momentum":
-      return `Momentum ${sf.momentum.score}/6 · ${bundle.quote.changePercentage >= 0 ? "+" : ""}${bundle.quote.changePercentage.toFixed(1)}% today`;
+      return `Momentum ${sf.momentum.score}/6 · ${data.changePercentage >= 0 ? "+" : ""}${data.changePercentage.toFixed(1)}% today`;
     case "quality":
       return roic !== undefined
         ? `ROIC ${(roic * 100).toFixed(1)}% · Health ${sf.financialHealth.score}/6`
@@ -365,27 +467,20 @@ export async function runScreener(
 
     const scored = await mapWithConcurrency(pool, SCORING_CONCURRENCY, async (c): Promise<ScreenerCandidate | null> => {
       try {
-        const bundle = await buildFinnhubBundle(c.symbol);
-        if (!bundle) return null;
-        const sf = computeSnowflake(bundle);
-        // Fundamentals coverage, not momentum — Finnhub's /stock/metric
-        // returns *something* (trading volume, 52-week range) for nearly
-        // every symbol even with zero real financials behind it, so
-        // checking ratios/keyMetrics for null isn't enough (confirmed live:
-        // ELMT/AIAI/VOGX all return 10-17 metric fields, none of them
-        // P/E, margins, or ROIC). The valuation/growth/quality/health axes'
-        // actual checks-that-ran count is the real signal.
-        const fundamentalsChecksRun =
-          sf.valuation.checks.length + sf.growth.checks.length + sf.quality.checks.length + sf.financialHealth.checks.length;
+        // getSymbolSnapshot is cached per-symbol, independent of intent —
+        // the fetch+score work only happens once per symbol per cache
+        // window even across different screens (see getSymbolScoreCache).
+        const snap = await getSymbolSnapshot(c.symbol);
+        if (!snap) return null;
         return {
           symbol: c.symbol,
           companyName: c.companyName,
-          price: bundle.quote.price,
-          compositeScore: scoreCandidate(intent, sf, weights),
-          keyStat: buildKeyStat(intent, bundle, sf),
+          price: snap.price,
+          compositeScore: scoreCandidate(intent, snap.sf, weights),
+          keyStat: buildKeyStat(intent, snap, snap.sf),
           // Flagged rather than hidden so a data-starved spike never looks
           // equivalent to a fully-scored pick (the "rocket stock" problem).
-          thinCoverage: fundamentalsChecksRun <= 3,
+          thinCoverage: snap.fundamentalsChecksRun <= 3,
         };
       } catch {
         return null; // one bad candidate shouldn't sink the whole screen
@@ -425,10 +520,17 @@ export async function runScreener(
     const sectorPercentileBySymbol = new Map<string, number>();
 
     const withInsider = await mapWithConcurrency(semifinalists, 4, async (candidate) => {
-      const [activity, trend, fundamentals] = await Promise.all([
+      const [activity, trend, fundamentals, financialsTrend, snap] = await Promise.all([
         fetchInsiderActivity(candidate.symbol).catch(() => null),
         fetchFinnhubRatingTrend(candidate.symbol).catch(() => null),
         fetchFinnhubFundamentals(candidate.symbol).catch(() => null),
+        // Real 5-year income/cash-flow trend — only worth the extra Finnhub
+        // call for the ~12 names actually in contention. The wide Stage 1
+        // scan only has a quote+metric snapshot (no growth axis to speak
+        // of); semifinalists get a real growth-axis score from this before
+        // the final cut to 5.
+        fetchFinnhubFinancialsTrend(candidate.symbol).catch(() => null),
+        getSymbolSnapshot(candidate.symbol),
       ]);
       if (trend) ratingTrendBySymbol.set(candidate.symbol, trend);
       const pe = fundamentals?.ratios?.priceToEarningsRatio;
@@ -436,7 +538,42 @@ export async function runScreener(
         const peerValuation = await fetchPeerValuation(candidate.symbol, pe).catch(() => null);
         if (peerValuation) sectorPercentileBySymbol.set(candidate.symbol, peerValuation.percentile);
       }
-      return activity ? { ...candidate, insiderActivity: activity } : candidate;
+
+      let enriched = candidate;
+      if (financialsTrend && fundamentals) {
+        const enrichedBundle: StockBundle = {
+          symbol: candidate.symbol,
+          quote: {
+            symbol: candidate.symbol,
+            name: candidate.companyName,
+            price: candidate.price,
+            changePercentage: snap?.changePercentage ?? 0,
+            marketCap: 0,
+            currency: "USD",
+            yearHigh: fundamentals.week52High,
+            yearLow: fundamentals.week52Low,
+          },
+          profile: null,
+          ratios: fundamentals.ratios,
+          keyMetrics: fundamentals.keyMetrics,
+          priceTargetConsensus: null,
+          gradesConsensus: null,
+          historicalMonthly: [],
+          income: financialsTrend.income,
+          cashFlow: financialsTrend.cashFlow,
+        };
+        const sf = computeSnowflake(enrichedBundle);
+        const fundamentalsChecksRun =
+          sf.valuation.checks.length + sf.growth.checks.length + sf.quality.checks.length + sf.financialHealth.checks.length;
+        enriched = {
+          ...candidate,
+          compositeScore: scoreCandidate(intent, sf, weights),
+          keyStat: buildKeyStat(intent, { ratios: fundamentals.ratios, keyMetrics: fundamentals.keyMetrics, changePercentage: enrichedBundle.quote.changePercentage }, sf),
+          thinCoverage: fundamentalsChecksRun <= 3,
+        };
+      }
+
+      return activity ? { ...enriched, insiderActivity: activity } : enriched;
     });
 
     // Real signals nudge the final ranking rather than overriding the

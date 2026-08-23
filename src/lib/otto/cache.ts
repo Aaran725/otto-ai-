@@ -46,6 +46,7 @@ const globalForCache = globalThis as unknown as {
   __ottoPeerCache?: TtlCache<unknown>;
   __ottoEarningsCache?: TtlCache<unknown>;
   __ottoShortInterestCache?: TtlCache<unknown>;
+  __ottoSymbolScoreCache?: TtlCache<unknown>;
 };
 
 export function getFmpCache<T>(): TtlCache<T> {
@@ -115,6 +116,17 @@ export function getShortInterestCache<T>(): TtlCache<T> {
   // FINRA only republishes this biweekly — no reason to refetch same-day.
   globalForCache.__ottoShortInterestCache ??= new TtlCache(24 * 60 * 60 * 1000); // 24 h
   return globalForCache.__ottoShortInterestCache as TtlCache<T>;
+}
+
+export function getSymbolScoreCache<T>(): TtlCache<T> {
+  // Per-symbol Snowflake snapshot (quote+fundamentals+score), independent of
+  // which screen intent asked for it — a stock scanned in "best" and then
+  // "quality" 10 minutes later reuses the same fetch instead of re-hitting
+  // Finnhub twice. This is what pays for widening the candidate pool: repeat
+  // symbols across screens (and across a session's worth of scans) become
+  // free instead of linear in the number of screens run.
+  globalForCache.__ottoSymbolScoreCache ??= new TtlCache(45 * 60 * 1000); // 45 min
+  return globalForCache.__ottoSymbolScoreCache as TtlCache<T>;
 }
 
 export function getPeerCache<T>(): TtlCache<T> {

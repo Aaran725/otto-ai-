@@ -160,6 +160,14 @@ export interface FmpKeyMetrics {
   returnOnEquity?: number;
   freeCashFlowYield?: number;
   netDebtToEBITDA?: number;
+  /** Only populated by the Finnhub fallback — real 13/26-week trailing price
+   * return and 13-week performance vs the S&P 500, straight from Finnhub's
+   * free /stock/metric response (already fetched for ratios/keyMetrics, so
+   * this is zero extra API cost). Lets the momentum axis judge a sustained
+   * multi-week trend instead of only today's 1-day move. */
+  thirteenWeekReturn?: number;
+  twentySixWeekReturn?: number;
+  relativeStrength13Week?: number;
 }
 
 export interface FmpPriceTargetConsensus {

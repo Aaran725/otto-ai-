@@ -196,6 +196,22 @@ export function computeSnowflake(bundle: StockBundle): OttoSnowflakeScores {
       passed: 1 + technicals.pctFromHigh > 0.75,
     });
   }
+  // Real trailing multi-week returns from Finnhub's free /stock/metric —
+  // only populated via the Finnhub fallback path, but crucial there: it's
+  // the difference between judging momentum on a sustained trend versus
+  // only whether today happened to be green.
+  if (keyMetrics?.thirteenWeekReturn !== undefined) {
+    momentumChecks.push({ label: "Positive 13-week return", passed: keyMetrics.thirteenWeekReturn > 0 });
+  }
+  if (keyMetrics?.twentySixWeekReturn !== undefined) {
+    momentumChecks.push({ label: "Positive 26-week return", passed: keyMetrics.twentySixWeekReturn > 0 });
+  }
+  if (keyMetrics?.relativeStrength13Week !== undefined) {
+    momentumChecks.push({
+      label: "Outperforming the S&P 500 over 13 weeks",
+      passed: keyMetrics.relativeStrength13Week > 0,
+    });
+  }
   const momentum = axis(momentumChecks);
 
   return { valuation, growth, quality, financialHealth, momentum };

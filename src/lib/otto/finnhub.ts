@@ -64,7 +64,7 @@ interface FinnhubMetricResponse {
  */
 export async function fetchFinnhubFundamentals(
   symbol: string
-): Promise<{ ratios: FmpRatios; keyMetrics: FmpKeyMetrics } | null> {
+): Promise<{ ratios: FmpRatios; keyMetrics: FmpKeyMetrics; week52High?: number; week52Low?: number } | null> {
   const data = await finnhubGet<FinnhubMetricResponse>(`/stock/metric?symbol=${encodeURIComponent(symbol)}&metric=all`);
   const m = data?.metric;
   if (!m || Object.keys(m).length === 0) return null;
@@ -98,9 +98,14 @@ export async function fetchFinnhubFundamentals(
     returnOnEquity: pct(m.roeTTM),
     freeCashFlowYield: pfcf && pfcf > 0 ? 1 / pfcf : undefined,
     netDebtToEBITDA: undefined,
+    // Finnhub's percent-return fields (e.g. 17.23 = +17.23%), converted to
+    // our internal fraction convention.
+    thirteenWeekReturn: pct(m["13WeekPriceReturnDaily"]),
+    twentySixWeekReturn: pct(m["26WeekPriceReturnDaily"]),
+    relativeStrength13Week: pct(m["priceRelativeToS&P50013Week"]),
   };
 
-  return { ratios, keyMetrics };
+  return { ratios, keyMetrics, week52High: m["52WeekHigh"] ?? undefined, week52Low: m["52WeekLow"] ?? undefined };
 }
 
 interface FinnhubQuoteResponse {
