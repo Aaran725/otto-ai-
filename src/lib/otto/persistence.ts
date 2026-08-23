@@ -1,13 +1,15 @@
 "use client";
 
 /**
- * Client-side persistence (localStorage) — there's no user-account/backend
- * system in this app, so a browser-local store is the right scope for a
- * single-user "book" rather than standing up auth + a database for it.
- * Two separate stores: an append-only CALL LOG (every fresh analysis Otto
- * runs, whether or not the user "saved" it — this is what makes the track
- * record honest, not cherry-picked) and a user-curated WATCHLIST.
+ * Watchlist + call-log persistence. Signed-out visitors get the original
+ * browser-local behavior (localStorage) — signed-in users get the same data
+ * synced to Supabase, scoped to their account via Row Level Security (see
+ * supabase/schema.sql). Every function checks auth state per call rather
+ * than requiring a userId param, so call sites don't need to know or care
+ * which backend is actually in use.
  */
+
+import { createClient } from "../supabase/client";
 
 export interface LoggedCall {
   id: string;
@@ -30,7 +32,7 @@ export interface WatchlistEntry {
 
 const CALL_LOG_KEY = "otto:call-log";
 const WATCHLIST_KEY = "otto:watchlist";
-const MAX_LOGGED_CALLS = 200; // bounds localStorage size — oldest entries drop off
+const MAX_LOGGED_CALLS = 200; // bounds storage size — oldest entries drop off
 
 function readJson<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -52,37 +54,136 @@ function writeJson<T>(key: string, value: T) {
   }
 }
 
-export function getCallLog(): LoggedCall[] {
-  return readJson<LoggedCall[]>(CALL_LOG_KEY, []);
+/** getSession() reads from local storage first — unlike getUser(), it
+ * doesn't round-trip to the auth server on every call, so this stays cheap
+ * even though every persistence function calls it. */
+async function getUserId(): Promise<string | null> {
+  const supabase = createClient();
+  const { data } = await supabase.auth.getSession();
+  return data.session?.user.id ?? null;
+}
+
+export async function getCallLog(): Promise<LoggedCall[]> {
+  const userId = await getUserId();
+  if (!userId) return readJson<LoggedCall[]>(CALL_LOG_KEY, []);
+
+  const supabase = createClient();
+  const { data, error } = await supabase
+    .from("call_log")
+    .select("id, symbol, company_name, called_at, called_price, conviction_score, verdict")
+    .order("called_at", { ascending: false })
+    .limit(MAX_LOGGED_CALLS);
+  if (error || !data) return [];
+
+  return data.map((r) => ({
+    id: r.id,
+    symbol: r.symbol,
+    companyName: r.company_name,
+    calledAt: r.called_at,
+    calledPrice: Number(r.called_price),
+    convictionScore: Number(r.conviction_score),
+    verdict: r.verdict,
+  }));
 }
 
 /** Called automatically for every fresh analysis, regardless of whether the
  * user saves it to a watchlist — the whole point is an unfiltered record. */
-export function logCall(call: Omit<LoggedCall, "id">) {
-  const log = getCallLog();
-  const entry: LoggedCall = { ...call, id: `${call.symbol}-${call.calledAt}` };
-  // Replace same-day duplicate calls for the same symbol rather than piling
-  // up near-identical entries every time a ticker is re-viewed.
-  const deduped = log.filter((c) => !(c.symbol === entry.symbol && c.calledAt.slice(0, 10) === entry.calledAt.slice(0, 10)));
-  writeJson(CALL_LOG_KEY, [entry, ...deduped].slice(0, MAX_LOGGED_CALLS));
+export async function logCall(call: Omit<LoggedCall, "id">) {
+  const userId = await getUserId();
+  const dayKey = call.calledAt.slice(0, 10);
+
+  if (!userId) {
+    const log = readJson<LoggedCall[]>(CALL_LOG_KEY, []);
+    const entry: LoggedCall = { ...call, id: `${call.symbol}-${call.calledAt}` };
+    // Replace same-day duplicate calls for the same symbol rather than
+    // piling up near-identical entries every time a ticker is re-viewed.
+    const deduped = log.filter((c) => !(c.symbol === entry.symbol && c.calledAt.slice(0, 10) === dayKey));
+    writeJson(CALL_LOG_KEY, [entry, ...deduped].slice(0, MAX_LOGGED_CALLS));
+    return;
+  }
+
+  const supabase = createClient();
+  // Same same-day dedupe rule, enforced against the DB instead of an
+  // in-memory array.
+  await supabase
+    .from("call_log")
+    .delete()
+    .eq("user_id", userId)
+    .eq("symbol", call.symbol)
+    .gte("called_at", `${dayKey}T00:00:00.000Z`)
+    .lt("called_at", `${dayKey}T23:59:59.999Z`);
+
+  await supabase.from("call_log").insert({
+    user_id: userId,
+    symbol: call.symbol,
+    company_name: call.companyName,
+    called_at: call.calledAt,
+    called_price: call.calledPrice,
+    conviction_score: call.convictionScore,
+    verdict: call.verdict,
+  });
 }
 
-export function getWatchlist(): WatchlistEntry[] {
-  return readJson<WatchlistEntry[]>(WATCHLIST_KEY, []);
+export async function getWatchlist(): Promise<WatchlistEntry[]> {
+  const userId = await getUserId();
+  if (!userId) return readJson<WatchlistEntry[]>(WATCHLIST_KEY, []);
+
+  const supabase = createClient();
+  const { data, error } = await supabase
+    .from("watchlist")
+    .select("symbol, company_name, added_at, added_price, added_conviction_score, added_verdict")
+    .order("added_at", { ascending: false });
+  if (error || !data) return [];
+
+  return data.map((r) => ({
+    symbol: r.symbol,
+    companyName: r.company_name,
+    addedAt: r.added_at,
+    addedPrice: Number(r.added_price),
+    addedConvictionScore: Number(r.added_conviction_score),
+    addedVerdict: r.added_verdict,
+  }));
 }
 
-export function isWatched(symbol: string): boolean {
-  return getWatchlist().some((w) => w.symbol === symbol.toUpperCase());
+export async function isWatched(symbol: string): Promise<boolean> {
+  const list = await getWatchlist();
+  return list.some((w) => w.symbol === symbol.toUpperCase());
 }
 
-export function addToWatchlist(entry: WatchlistEntry) {
-  const list = getWatchlist().filter((w) => w.symbol !== entry.symbol.toUpperCase());
-  writeJson(WATCHLIST_KEY, [{ ...entry, symbol: entry.symbol.toUpperCase() }, ...list]);
+export async function addToWatchlist(entry: WatchlistEntry) {
+  const userId = await getUserId();
+  const symbol = entry.symbol.toUpperCase();
+
+  if (!userId) {
+    const list = readJson<WatchlistEntry[]>(WATCHLIST_KEY, []).filter((w) => w.symbol !== symbol);
+    writeJson(WATCHLIST_KEY, [{ ...entry, symbol }, ...list]);
+    return;
+  }
+
+  const supabase = createClient();
+  await supabase.from("watchlist").upsert({
+    user_id: userId,
+    symbol,
+    company_name: entry.companyName,
+    added_at: entry.addedAt,
+    added_price: entry.addedPrice,
+    added_conviction_score: entry.addedConvictionScore,
+    added_verdict: entry.addedVerdict,
+  });
 }
 
-export function removeFromWatchlist(symbol: string) {
-  writeJson(
-    WATCHLIST_KEY,
-    getWatchlist().filter((w) => w.symbol !== symbol.toUpperCase())
-  );
+export async function removeFromWatchlist(symbol: string) {
+  const userId = await getUserId();
+  const upper = symbol.toUpperCase();
+
+  if (!userId) {
+    writeJson(
+      WATCHLIST_KEY,
+      readJson<WatchlistEntry[]>(WATCHLIST_KEY, []).filter((w) => w.symbol !== upper)
+    );
+    return;
+  }
+
+  const supabase = createClient();
+  await supabase.from("watchlist").delete().eq("user_id", userId).eq("symbol", upper);
 }

@@ -56,8 +56,8 @@ export function PortfolioPanel({
               </p>
             </button>
             <button
-              onClick={() => {
-                removeFromWatchlist(w.symbol);
+              onClick={async () => {
+                await removeFromWatchlist(w.symbol);
                 onChange();
               }}
               className="shrink-0 text-xs text-otto-text-faint hover:text-otto-bear"

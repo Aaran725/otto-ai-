@@ -13,6 +13,8 @@ import { ScreenerResultsCard } from "./ScreenerResultsCard";
 import { PresetMenu } from "./PresetMenu";
 import { TrackRecordPanel } from "./TrackRecordPanel";
 import { PortfolioPanel } from "./PortfolioPanel";
+import { AuthModal } from "./AuthModal";
+import { useAuth } from "@/lib/supabase/auth-context";
 import {
   logCall,
   getCallLog,
@@ -40,25 +42,30 @@ export function ChatApp() {
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
   const [panel, setPanel] = useState<"track-record" | "watchlist" | null>(null);
   const [scrolled, setScrolled] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const { user, loading: authLoading, signOut } = useAuth();
 
-  // localStorage only exists client-side — load on mount rather than during
-  // the initial render (which may run on the server).
-  useEffect(() => {
-    setCallLog(getCallLog());
-    setWatchlist(getWatchlist());
-  }, []);
-
-  function refreshPersisted() {
-    setCallLog(getCallLog());
-    setWatchlist(getWatchlist());
+  async function refreshPersisted() {
+    const [calls, list] = await Promise.all([getCallLog(), getWatchlist()]);
+    setCallLog(calls);
+    setWatchlist(list);
   }
 
-  function toggleWatch(analysis: OttoAnalysis) {
-    if (isWatched(analysis.ticker)) {
-      removeFromWatchlist(analysis.ticker);
+  // Re-load whenever auth state resolves or changes — signing in/out swaps
+  // which backend (Supabase vs. localStorage) persistence.ts reads from, so
+  // the previously-loaded list is for the wrong account otherwise.
+  useEffect(() => {
+    if (authLoading) return;
+    refreshPersisted();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, user?.id]);
+
+  async function toggleWatch(analysis: OttoAnalysis) {
+    if (await isWatched(analysis.ticker)) {
+      await removeFromWatchlist(analysis.ticker);
     } else {
-      addToWatchlist({
+      await addToWatchlist({
         symbol: analysis.ticker,
         companyName: analysis.companyName,
         addedAt: new Date().toISOString(),
@@ -67,7 +74,7 @@ export function ChatApp() {
         addedVerdict: analysis.verdict,
       });
     }
-    refreshPersisted();
+    await refreshPersisted();
   }
 
   function scrollToBottom() {
@@ -128,7 +135,7 @@ export function ChatApp() {
       // Log every fresh analysis automatically — the track record has to be
       // the whole record, not a cherry-picked subset the user chose to save.
       if (done.card) {
-        logCall({
+        await logCall({
           symbol: done.card.ticker,
           companyName: done.card.companyName,
           calledAt: done.card.generatedAt,
@@ -136,7 +143,7 @@ export function ChatApp() {
           convictionScore: done.card.convictionScore,
           verdict: done.card.verdict,
         });
-        setCallLog(getCallLog());
+        setCallLog(await getCallLog());
       }
 
       setMessages((prev) => [
@@ -188,6 +195,23 @@ export function ChatApp() {
           >
             Track Record{callLog.length > 0 ? ` (${callLog.length})` : ""}
           </button>
+          <div className="h-3.5 w-px bg-otto-border" />
+          {user ? (
+            <button
+              onClick={() => signOut()}
+              title={user.email ?? undefined}
+              className="otto-text-caption rounded-full px-3 py-1 text-otto-text-muted transition-colors hover:text-otto-text"
+            >
+              Sign out
+            </button>
+          ) : (
+            <button
+              onClick={() => setAuthOpen(true)}
+              className="otto-text-caption rounded-full px-3 py-1 text-otto-gold transition-colors hover:opacity-80"
+            >
+              Sign in
+            </button>
+          )}
         </div>
       </div>
       {isEmpty ? (
@@ -352,6 +376,8 @@ export function ChatApp() {
           }}
         />
       </SlideOver>
+
+      <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
     </div>
   );
 }
