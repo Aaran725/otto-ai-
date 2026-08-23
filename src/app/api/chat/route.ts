@@ -40,7 +40,23 @@ export async function POST(request: Request) {
         // request to regenerate the card — only re-run the full pipeline when
         // there's no existing card for this ticker, or the message is an
         // explicit fresh/refresh request.
-        const resolved = await resolveTickerFromText(message);
+        // Screen signal is computed before ticker resolution: a screen-y
+        // phrase ("mega cap stocks", "any rocket stocks?", "massive upside
+        // potential") often shares a word with a real company/ticker name
+        // ("Apple", "Rocket Companies", ...) — resolving the whole message
+        // as a fuzzy company-name search would misroute the entire request
+        // to that one ticker instead of running the screener. When a screen
+        // is detected, ticker resolution only trusts explicit $TICKER / ALL-
+        // CAPS signals, not the fuzzy whole-message name match.
+        const theme = detectThemeFilter(message);
+        const capFilter = detectCapFilter(message);
+        // A theme/cap filter alone ("AI stocks", "mega cap stocks") with no
+        // explicit intent word defaults to "best" — momentum stays momentum
+        // even with a filter, since "hot AI stocks" should still mean
+        // momentum-ranked, not composite.
+        const screenIntent = detectScreenIntent(message) ?? (theme || capFilter ? "best" : null);
+
+        const resolved = await resolveTickerFromText(message, { skipFuzzyNameMatch: !!screenIntent });
         const isNewTicker = resolved && resolved.symbol !== lastCard?.ticker;
         const wantsFreshAnalysis = resolved && (isNewTicker || looksLikeFreshRequest(message));
 
@@ -58,14 +74,6 @@ export async function POST(request: Request) {
         // a generic "give me a ticker" prompt or a stale follow-up about
         // whatever was discussed last.
         if (!resolved) {
-          const theme = detectThemeFilter(message);
-          const capFilter = detectCapFilter(message);
-          // A theme/cap filter alone ("AI stocks", "mega cap stocks") with no
-          // explicit intent word defaults to "best" — momentum stays momentum
-          // even with a filter, since "hot AI stocks" should still mean
-          // momentum-ranked, not composite.
-          const screenIntent = detectScreenIntent(message) ?? (theme || capFilter ? "best" : null);
-
           if (screenIntent) {
             const results = await runScreener(screenIntent, theme, capFilter, (update) => send({ type: "status", ...update }));
             if (results.length === 0) {

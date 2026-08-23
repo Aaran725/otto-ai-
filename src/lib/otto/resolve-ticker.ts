@@ -44,7 +44,10 @@ export interface ResolvedTicker extends FmpSearchResult {}
  * against SEC's full ticker universe. Neither fallback is as good as FMP's
  * real search, but "works, cruder" beats "the whole pipeline is down."
  */
-export async function resolveTickerFromText(text: string): Promise<ResolvedTicker | null> {
+export async function resolveTickerFromText(
+  text: string,
+  opts: { skipFuzzyNameMatch?: boolean } = {}
+): Promise<ResolvedTicker | null> {
   const explicit = extractExplicitCandidates(text);
 
   for (const candidate of explicit) {
@@ -57,6 +60,13 @@ export async function resolveTickerFromText(text: string): Promise<ResolvedTicke
     const fallback = await resolveTickerViaFinnhub(candidate).catch(() => null);
     if (fallback) return fallback;
   }
+
+  // Callers that already detected a market-screen request (e.g. "mega cap
+  // stocks", "any rocket stocks?") skip the fuzzy whole-message match below —
+  // a screen-y phrase that happens to share a word with a real company name
+  // ("Apple", "Rocket", "Safe") would otherwise get misrouted to that single
+  // ticker instead of running the screener across hundreds of candidates.
+  if (opts.skipFuzzyNameMatch) return null;
 
   // Fallback: try resolving the whole message as a company name, but only
   // accept it if the matched company name plausibly appears in the text

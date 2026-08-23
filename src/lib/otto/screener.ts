@@ -34,7 +34,11 @@ export function detectScreenIntent(message: string): ScreenIntent | null {
   if (/worst stock|red flag|stocks? to avoid|risky stock|bad stock|what to avoid|\bavoid\b/.test(m)) {
     return "avoid";
   }
-  if (/\bpick\b|\brecommend|best stock|good stock|what should i buy|give me a stock/.test(m)) {
+  if (
+    /\bpick\b|\brecommend|best stock|good stock|what should i buy|give me a stock|find (me |us )?(a |some )?(good |great |strong |solid )?stocks?|upside potential|massive (gains|upside|growth|potential)|growth potential|high(est)? potential stock|next (big|great) stock|winning stock|strong stock|stocks? (worth buying|to buy)|invest in/.test(
+      m
+    )
+  ) {
     return "best";
   }
   return null;

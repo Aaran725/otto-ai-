@@ -10,7 +10,7 @@ interface Preset {
 }
 
 const PRESETS: Preset[] = [
-  { emoji: "🏢", label: "Mega-cap giants", query: "best mega cap stocks like Apple, Google, Tesla" },
+  { emoji: "🏢", label: "Mega-cap giants", query: "best mega cap stocks" },
   { emoji: "🏆", label: "Otto's best pick", query: "what's your best pick?" },
   { emoji: "💎", label: "Undervalued", query: "find undervalued stocks" },
   { emoji: "🚀", label: "Rocket stocks", query: "any rocket stocks?" },
