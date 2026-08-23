@@ -17,6 +17,7 @@ import { fetchShortInterest } from "./short-interest";
 import { fetchInsiderActivity } from "./insider";
 import { computePositionSizing } from "./position-sizing";
 import type { StockBundle } from "./fmp";
+import type { ProgressFn } from "./chat-types";
 
 function ratingFromCounts(c: { strongBuy: number; buy: number; hold: number; sell: number; strongSell: number }): string {
   const buyWeight = c.strongBuy + c.buy;
@@ -159,7 +160,7 @@ const PARTIAL_ANALYSIS_TTL_MS = 5 * 60 * 1000; // retry soon rather than staying
 export async function runOttoAnalysis(
   ticker: string,
   bundle: StockBundle,
-  onProgress?: (text: string) => void
+  onProgress?: ProgressFn
 ): Promise<OttoAnalysis> {
   const cacheKey = `${ticker}:${new Date().toISOString().slice(0, 10)}`;
   const cache = getAnalysisCache<OttoAnalysis>();
@@ -178,32 +179,117 @@ export async function runOttoAnalysis(
   return analysis;
 }
 
-async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress?: (text: string) => void): Promise<OttoAnalysis> {
-    onProgress?.("Computing Snowflake & forecast…");
+async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress?: ProgressFn): Promise<OttoAnalysis> {
+    onProgress?.({ id: "snowflake", text: "Computing Snowflake & forecast…", icon: "otto", tracksFinding: true });
     const snowflakeScores = computeSnowflake(bundle);
     const forecastTargets = computeForecastTargets(bundle);
+    onProgress?.({
+      id: "snowflake",
+      text: "Computing Snowflake & forecast…",
+      finding: "Scored valuation, growth, quality, health & momentum",
+      icon: "otto",
+      tracksFinding: true,
+    });
 
-    onProgress?.("Checking SEC filings, sector peers, insider Form 4s & earnings history…");
+    // Each of these genuinely runs in parallel, so every stage announces
+    // itself up front, then updates its OWN entry (matched by id) with a
+    // real finding the moment its fetch resolves — not one combined
+    // "reading things" message with a single summary tacked on at the end.
+    onProgress?.({ id: "street", text: "Checking analyst consensus…", icon: "fmp", tracksFinding: true });
+    onProgress?.({ id: "filing", text: "Checking SEC EDGAR for the latest 10-K…", icon: "sec", tracksFinding: true });
+    onProgress?.({ id: "macro", text: "Pulling the macro backdrop…", icon: "fred", tracksFinding: true });
+    onProgress?.({ id: "peers", text: "Pulling real sector peer valuations…", icon: "finnhub", tracksFinding: true });
+    onProgress?.({ id: "earnings", text: "Checking earnings beat/miss history…", icon: "finnhub", tracksFinding: true });
+    onProgress?.({ id: "shortinterest", text: "Checking short interest…", icon: "finnhub", tracksFinding: true });
+    onProgress?.({ id: "insider", text: "Cross-referencing Form 4 insider filings…", icon: "sec", tracksFinding: true });
+
     // Enrichment only — never let a slow/failed fetch block the analysis.
     const [streetConsensus, filingExcerpt, macro, peerValuation, earnings, shortInterest, insiderActivity] = await Promise.all([
-      computeStreetConsensus(bundle, bundle.symbol).catch(() => null),
-      fetchRiskFactorExcerpt(bundle.profile?.cik, bundle.symbol).catch(() => null),
-      fetchMacroContext().catch(() => null),
-      fetchPeerValuation(bundle.symbol, bundle.ratios?.priceToEarningsRatio).catch(() => null),
-      fetchEarningsRecord(bundle.symbol).catch(() => null),
-      fetchShortInterest(bundle.symbol).catch(() => null),
-      fetchInsiderActivity(bundle.symbol).catch(() => null),
+      computeStreetConsensus(bundle, bundle.symbol)
+        .catch(() => null)
+        .then((r) => {
+          onProgress?.({
+            id: "street",
+            text: "Checking analyst consensus…",
+            finding: r ? `${r.analystCount} analysts · ${r.rating}` : "No analyst coverage found",
+            icon: "fmp",
+            tracksFinding: true,
+          });
+          return r;
+        }),
+      fetchRiskFactorExcerpt(bundle.profile?.cik, bundle.symbol)
+        .catch(() => null)
+        .then((r) => {
+          onProgress?.({
+            id: "filing",
+            text: "Checking SEC EDGAR for the latest 10-K…",
+            finding: r ? "Found the risk-factors excerpt" : "No 10-K excerpt available",
+            icon: "sec",
+            tracksFinding: true,
+          });
+          return r;
+        }),
+      fetchMacroContext()
+        .catch(() => null)
+        .then((r) => {
+          onProgress?.({
+            id: "macro",
+            text: "Pulling the macro backdrop…",
+            finding: r ? `Fed funds ${r.fedFundsRate.toFixed(2)}% · 10Y ${r.treasury10Y.toFixed(2)}%` : "Macro data unavailable",
+            icon: "fred",
+            tracksFinding: true,
+          });
+          return r;
+        }),
+      fetchPeerValuation(bundle.symbol, bundle.ratios?.priceToEarningsRatio)
+        .catch(() => null)
+        .then((r) => {
+          onProgress?.({
+            id: "peers",
+            text: "Pulling real sector peer valuations…",
+            finding: r ? `${r.peerCount} real sector peers found` : "No sector peers found",
+            icon: "finnhub",
+            tracksFinding: true,
+          });
+          return r;
+        }),
+      fetchEarningsRecord(bundle.symbol)
+        .catch(() => null)
+        .then((r) => {
+          onProgress?.({
+            id: "earnings",
+            text: "Checking earnings beat/miss history…",
+            finding: r ? `${r.beatCount}/${r.beatCount + r.missCount} recent beats` : "No earnings history found",
+            icon: "finnhub",
+            tracksFinding: true,
+          });
+          return r;
+        }),
+      fetchShortInterest(bundle.symbol)
+        .catch(() => null)
+        .then((r) => {
+          onProgress?.({
+            id: "shortinterest",
+            text: "Checking short interest…",
+            finding: r ? `${r.daysToCover.toFixed(1)}d to cover` : "No short interest data",
+            icon: "finnhub",
+            tracksFinding: true,
+          });
+          return r;
+        }),
+      fetchInsiderActivity(bundle.symbol)
+        .catch(() => null)
+        .then((r) => {
+          onProgress?.({
+            id: "insider",
+            text: "Cross-referencing Form 4 insider filings…",
+            finding: r ? `${r.buys} buys · ${r.sells} sells (180d)` : "No recent insider activity",
+            icon: "sec",
+            tracksFinding: true,
+          });
+          return r;
+        }),
     ]);
-
-    // A brief "here's what I actually found" reveal before moving on to
-    // writing the analysis — real values only, each clause added only when
-    // that fetch genuinely succeeded, never a filled-in placeholder.
-    const found: string[] = [];
-    if (insiderActivity) found.push(`insiders ${insiderActivity.direction}`);
-    if (peerValuation) found.push(`${peerValuation.peerCount} sector peers`);
-    if (earnings) found.push(`${earnings.beatCount}/${earnings.beatCount + earnings.missCount} recent earnings beats`);
-    if (shortInterest) found.push(`${shortInterest.daysToCover.toFixed(1)}d to cover short interest`);
-    if (found.length > 0) onProgress?.(`Found: ${found.join(" · ")}`);
 
     const metrics = computeMetrics(bundle, peerValuation, earnings, shortInterest);
     const rateSensitivity = computeRateSensitivity(bundle.keyMetrics?.freeCashFlowYield, macro?.treasury10Y);
@@ -224,7 +310,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
         : {}),
     };
 
-    onProgress?.("Writing the analysis…");
+    onProgress?.({ id: "writing", text: "Writing the analysis…", icon: "otto" });
     const groqResponse = await withKeyRotation(async (client) => {
       const completion = await client.chat.completions.create({
         model: ANALYSIS_MODEL,

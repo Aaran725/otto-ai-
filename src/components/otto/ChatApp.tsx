@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { clsx } from "clsx";
-import type { ChatMessage, ChatStreamEvent } from "@/lib/otto/chat-types";
+import type { ChatMessage, ChatStreamEvent, ProgressUpdate, StageIcon } from "@/lib/otto/chat-types";
 import type { OttoAnalysis } from "@/lib/otto/schema";
 import { OttoCardCompact } from "./OttoCardCompact";
 import { MiniSparkline } from "./MiniSparkline";
@@ -31,11 +31,29 @@ function uid() {
   return Math.random().toString(36).slice(2);
 }
 
+const STAGE_ICON_LETTER: Record<StageIcon, string> = { sec: "S", finnhub: "F", fmp: "$", fred: "M", otto: "O" };
+
+/** Small data-source mark for one loading stage — the same active
+ * (pulsing gold) / settled (bull green) coloring the dots always used,
+ * now labeled by which real source that stage is hitting. */
+function StageBadge({ icon, settled }: { icon?: StageIcon; settled: boolean }) {
+  return (
+    <span
+      className={clsx(
+        "otto-text-label flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-[8px] leading-none",
+        settled ? "bg-otto-bull/15 text-otto-bull" : "animate-pulse bg-otto-gold/20 text-otto-gold"
+      )}
+    >
+      {STAGE_ICON_LETTER[icon ?? "otto"]}
+    </span>
+  );
+}
+
 export function ChatApp() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
-  const [statusTrace, setStatusTrace] = useState<string[]>([]);
+  const [statusTrace, setStatusTrace] = useState<ProgressUpdate[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [callLog, setCallLog] = useState<LoggedCall[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
@@ -121,7 +139,17 @@ export function ChatApp() {
 
           const event = JSON.parse(line) as ChatStreamEvent;
           if (event.type === "status") {
-            setStatusTrace((prev) => [...prev, event.text]);
+            // Stages announce themselves once (just `text`), then update the
+            // SAME entry in place once their fetch resolves (adding
+            // `finding`) — merge by id rather than always appending, so a
+            // stage's line updates instead of duplicating.
+            setStatusTrace((prev) => {
+              const idx = prev.findIndex((s) => s.id === event.id);
+              if (idx === -1) return [...prev, event];
+              const next = [...prev];
+              next[idx] = { ...next[idx], ...event };
+              return next;
+            });
             scrollToBottom();
           } else {
             done = event;
@@ -294,7 +322,7 @@ export function ChatApp() {
               </div>
             ))}
             {pending && (
-              <div className="otto-arrive flex flex-col gap-1.5">
+              <div className="otto-arrive otto-progress-rail flex flex-col gap-2">
                 {statusTrace.length === 0 ? (
                   <div className="flex items-center gap-1.5 text-otto-text-faint">
                     <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
@@ -303,22 +331,26 @@ export function ChatApp() {
                   </div>
                 ) : (
                   statusTrace.map((stage, i) => {
-                    const isCurrent = i === statusTrace.length - 1;
+                    // A stage that tracks its own finding only settles once
+                    // that finding actually lands (genuinely parallel work —
+                    // several can be "still in flight" at once). A plain
+                    // sequential stage (no finding ever coming) falls back to
+                    // "settled once a later stage exists," same as before.
+                    const settled = stage.finding !== undefined || (!stage.tracksFinding && i < statusTrace.length - 1);
                     return (
-                      <div
-                        key={i}
-                        className={clsx(
-                          "otto-arrive flex items-center gap-2 text-xs",
-                          isCurrent ? "text-otto-text-muted" : "text-otto-text-faint"
-                        )}
-                      >
-                        <span
+                      <div key={stage.id} className="flex flex-col gap-0.5">
+                        <div
                           className={clsx(
-                            "h-1.5 w-1.5 shrink-0 rounded-full",
-                            isCurrent ? "animate-pulse bg-otto-gold" : "bg-otto-bull"
+                            "otto-arrive flex items-center gap-2 text-xs",
+                            settled ? "text-otto-text-faint" : "text-otto-text-muted"
                           )}
-                        />
-                        <span className={isCurrent ? "" : "line-through decoration-otto-text-faint/50"}>{stage}</span>
+                        >
+                          <StageBadge icon={stage.icon} settled={settled} />
+                          <span className={settled ? "line-through decoration-otto-text-faint/50" : ""}>{stage.text}</span>
+                        </div>
+                        {stage.finding && (
+                          <span className="otto-finding-flash otto-text-caption pl-5 text-otto-bull">✓ {stage.finding}</span>
+                        )}
                       </div>
                     );
                   })

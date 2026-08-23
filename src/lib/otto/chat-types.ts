@@ -70,6 +70,30 @@ export interface ChatResponseBody {
   screener?: ScreenerResults;
 }
 
+/** Which real data source a progress stage is hitting — powers the small
+ * stage-icon marks in the loading trace. */
+export type StageIcon = "sec" | "finnhub" | "fmp" | "fred" | "otto";
+
+/**
+ * One stage update. `id` lets the client merge repeat updates for the same
+ * stage in place instead of appending a new line (a stage announces itself
+ * once with just `text`, then updates the SAME entry with `finding` once
+ * its fetch resolves). `tracksFinding: true` marks a stage as part of a
+ * genuinely parallel batch — the client only ever settles/strikes it
+ * through once its own `finding` arrives, rather than assuming it's done
+ * just because a later stage started (which is what the plain sequential
+ * stages — the screener's, currently — actually want).
+ */
+export interface ProgressUpdate {
+  id: string;
+  text: string;
+  finding?: string;
+  icon?: StageIcon;
+  tracksFinding?: boolean;
+}
+
+export type ProgressFn = (update: ProgressUpdate) => void;
+
 /**
  * The chat route streams newline-delimited JSON so a slow multi-stage
  * screener scan can report real progress instead of one silent wait — a
@@ -78,5 +102,5 @@ export interface ChatResponseBody {
  * optional error, since a stream can't change its HTTP status mid-flight).
  */
 export type ChatStreamEvent =
-  | { type: "status"; text: string }
+  | ({ type: "status" } & ProgressUpdate)
   | ({ type: "done"; error?: string } & Partial<ChatResponseBody>);

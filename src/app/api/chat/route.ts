@@ -3,7 +3,7 @@ import { runOttoAnalysis, runOttoFollowUp } from "@/lib/otto/groq";
 import { resolveTickerFromText } from "@/lib/otto/resolve-ticker";
 import { looksLikeFreshRequest, detectFollowUpTopic, buildFollowUpVisual } from "@/lib/otto/followup-intent";
 import { detectScreenIntent, detectThemeFilter, detectCapFilter, intentLabel, runScreener } from "@/lib/otto/screener";
-import type { ChatRequestBody, ChatStreamEvent } from "@/lib/otto/chat-types";
+import type { ChatRequestBody, ChatStreamEvent, ProgressFn } from "@/lib/otto/chat-types";
 
 /**
  * Streams newline-delimited JSON instead of one JSON blob. A single-stock
@@ -45,7 +45,7 @@ export async function POST(request: Request) {
         const wantsFreshAnalysis = resolved && (isNewTicker || looksLikeFreshRequest(message));
 
         if (wantsFreshAnalysis && resolved) {
-          const emit = (text: string) => send({ type: "status", text });
+          const emit: ProgressFn = (update) => send({ type: "status", ...update });
           const bundle = await fetchStockBundle(resolved.symbol, emit);
           const analysis = await runOttoAnalysis(resolved.symbol, bundle, emit);
           send({ type: "done", reply: analysis.oneLiner, card: analysis });
@@ -67,7 +67,7 @@ export async function POST(request: Request) {
           const screenIntent = detectScreenIntent(message) ?? (theme || capFilter ? "best" : null);
 
           if (screenIntent) {
-            const results = await runScreener(screenIntent, theme, capFilter, (text) => send({ type: "status", text }));
+            const results = await runScreener(screenIntent, theme, capFilter, (update) => send({ type: "status", ...update }));
             if (results.length === 0) {
               send({
                 type: "done",

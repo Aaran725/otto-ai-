@@ -3,6 +3,7 @@ import { fetchFinnhubFundamentals, fetchFinnhubFinancialsTrend, fetchFinnhubProf
 import { fetchYahooHistoricalMonthly } from "./yahoo";
 import { fetchAlpacaSnapshot, fetchAlpacaHistoricalMonthly } from "./alpaca";
 import { fetchCikForSymbol } from "./sec-universe";
+import type { ProgressFn } from "./chat-types";
 
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 
@@ -266,15 +267,22 @@ export async function fetchBiggestGainers(): Promise<FmpMarketMover[]> {
 
 const PARTIAL_BUNDLE_TTL_MS = 3 * 60 * 1000; // retry soon instead of staying broken for the full 30 min
 
-export async function fetchStockBundle(ticker: string, onProgress?: (text: string) => void): Promise<StockBundle> {
+export async function fetchStockBundle(ticker: string, onProgress?: ProgressFn): Promise<StockBundle> {
   const symbol = ticker.toUpperCase();
   const cache = getFmpCache<StockBundle>();
 
   const cached = cache.get(symbol);
   if (cached) return cached; // cache hit: genuinely instant, no stages to report
 
-  onProgress?.(`Pulling market data for ${symbol}…`);
+  onProgress?.({ id: "market-data", text: `Pulling market data for ${symbol}…`, icon: "fmp", tracksFinding: true });
   const bundle = await buildStockBundle(symbol);
+  onProgress?.({
+    id: "market-data",
+    text: `Pulling market data for ${symbol}…`,
+    finding: bundle.profile ? "Live price, financials & ratios pulled" : "Price pulled — some fundamentals limited",
+    icon: "fmp",
+    tracksFinding: true,
+  });
 
   // A fetch that came back empty due to a rate limit (not a genuine "this
   // ticker has no data") shouldn't get stuck behind the full TTL — that's

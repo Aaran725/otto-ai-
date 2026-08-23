@@ -9,6 +9,7 @@ import { fetchInsiderClusterFeed, type InsiderClusterEntry } from "./insider-fee
 import { fetchRiskFactorExcerpt } from "./sec-edgar";
 import { fetchMacroContext } from "./fred";
 import { fetchPeerValuation } from "./peers";
+import type { ProgressFn } from "./chat-types";
 
 export type ScreenIntent = "undervalued" | "momentum" | "best" | "quality" | "avoid";
 
@@ -326,7 +327,7 @@ export async function runScreener(
   intent: ScreenIntent,
   theme: ThemeFilter | null = null,
   capFilter: CapFilter | null = null,
-  onProgress?: (text: string) => void
+  onProgress?: ProgressFn
 ): Promise<ScreenerCandidate[]> {
   const cacheKey = [intent, theme?.key, capFilter?.key].filter(Boolean).join(":");
   // On a cache hit nothing below runs, so no progress events fire — the
@@ -340,7 +341,7 @@ export async function runScreener(
       fetchMacroContext().catch(() => null),
       fetchInsiderClusterFeed().catch(() => [] as InsiderClusterEntry[]),
     ]);
-    onProgress?.(`Scanning ${pool.length} tickers…`);
+    onProgress?.({ id: "scan", text: `Scanning ${pool.length} tickers…`, icon: "finnhub" });
 
     const weights = applyRegimeTilt(AXIS_WEIGHTS[intent], macro);
     const clusterBySymbol = new Map(clusterFeed.map((e) => [e.symbol, e]));
@@ -399,7 +400,7 @@ export async function runScreener(
         if (a.thinCoverage !== b.thinCoverage) return a.thinCoverage ? 1 : -1;
         return ascending ? preRankKey(a) - preRankKey(b) : preRankKey(b) - preRankKey(a);
       });
-    onProgress?.(`${ranked.length} cleared fundamentals — narrowing to the leading candidates…`);
+    onProgress?.({ id: "narrow", text: `${ranked.length} cleared fundamentals — narrowing to the leading candidates…`, icon: "otto" });
 
     // Stage 3: the expensive real-money checks — per-company Form 4 detail
     // (for the display data, distinct from the market-wide cluster feed
@@ -410,7 +411,11 @@ export async function runScreener(
     const SEMIFINALIST_COUNT = 12;
     const semifinalists = ranked.slice(0, SEMIFINALIST_COUNT);
     const rest = ranked.slice(SEMIFINALIST_COUNT);
-    onProgress?.(`Cross-checking insider trades, analyst tone, and sector valuation on ${semifinalists.length} finalists…`);
+    onProgress?.({
+      id: "crosscheck",
+      text: `Cross-checking insider trades, analyst tone, and sector valuation on ${semifinalists.length} finalists…`,
+      icon: "sec",
+    });
 
     const ratingTrendBySymbol = new Map<string, { direction: "improving" | "worsening" | "flat"; delta: number }>();
     const sectorPercentileBySymbol = new Map<string, number>();
@@ -459,7 +464,7 @@ export async function runScreener(
     // Stage 4: only the actual final 5 get a real 10-K excerpt — purely
     // presentational (doesn't affect ranking, unlike the insider check),
     // so there's no reason to spend it on anyone who didn't make the cut.
-    onProgress?.("Reading SEC filings for the top picks…");
+    onProgress?.({ id: "filings", text: "Reading SEC filings for the top picks…", icon: "sec" });
     return mapWithConcurrency(finalists, 5, async (candidate) => {
       const cik = await fetchCikForSymbol(candidate.symbol);
       const excerpt = await fetchRiskFactorExcerpt(cik ?? undefined, candidate.symbol).catch(() => null);

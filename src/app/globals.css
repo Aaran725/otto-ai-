@@ -378,3 +378,50 @@ button:active {
     animation: none;
   }
 }
+
+/* Progress trace — a thin glass rail connecting the stage badges, so the
+   loading checklist reads as one continuous strand of work rather than
+   floating dots. */
+.otto-progress-rail {
+  position: relative;
+  padding-left: 0.125rem;
+}
+.otto-progress-rail::before {
+  content: "";
+  position: absolute;
+  left: 0.5625rem; /* centers under the 0.875rem stage badges */
+  top: 0.25rem;
+  bottom: 0.25rem;
+  width: 1px;
+  background: linear-gradient(to bottom, var(--otto-gold), var(--otto-border-soft));
+  opacity: 0.3;
+}
+
+/* A stage's finding flashes in clearly, holds, then settles to a dim
+   permanent annotation under its (now struck-through) label — "here's
+   what I'm learning," not just "here's what I'm doing." */
+@keyframes otto-finding-flash {
+  0% {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  12% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.55;
+  }
+}
+.otto-finding-flash {
+  animation: otto-finding-flash 2.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .otto-finding-flash {
+    animation: none;
+    opacity: 0.55;
+  }
+}
