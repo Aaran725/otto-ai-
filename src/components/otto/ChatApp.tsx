@@ -14,6 +14,7 @@ import { PresetMenu } from "./PresetMenu";
 import { TrackRecordPanel } from "./TrackRecordPanel";
 import { PortfolioPanel } from "./PortfolioPanel";
 import { AuthModal } from "./AuthModal";
+import { LandingHero } from "./LandingHero";
 import { useAuth } from "@/lib/supabase/auth-context";
 import {
   logCall,
@@ -25,8 +26,6 @@ import {
   type LoggedCall,
   type WatchlistEntry,
 } from "@/lib/otto/persistence";
-
-const EXAMPLES = ["Is UBER undervalued?", "What's your best pick?", "Any rocket stocks?"];
 
 function uid() {
   return Math.random().toString(36).slice(2);
@@ -44,6 +43,7 @@ export function ChatApp() {
   const [scrolled, setScrolled] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const { user, loading: authLoading, signOut } = useAuth();
 
   async function refreshPersisted() {
@@ -177,10 +177,16 @@ export function ChatApp() {
       <div className="relative min-h-0 flex-1">
       <div
         className={clsx(
-          "absolute inset-x-0 top-0 z-20 flex items-center justify-end border-b px-4 py-2 transition-colors duration-300 sm:px-0 sm:pr-4",
+          "absolute inset-x-0 top-0 z-20 flex items-center justify-between border-b px-4 py-2 transition-colors duration-300 sm:px-6",
           scrolled ? "otto-material-thick border-otto-border-soft" : "border-transparent"
         )}
       >
+        <div className="flex items-center gap-2">
+          <span className="otto-material flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold text-otto-gold">
+            O
+          </span>
+          <span className="otto-text-caption font-semibold tracking-wide text-otto-text">Otto AI</span>
+        </div>
         <div className="otto-material flex items-center rounded-full border p-0.5">
           <button
             onClick={() => setPanel("watchlist")}
@@ -222,19 +228,7 @@ export function ChatApp() {
         </div>
       </div>
       {isEmpty ? (
-        <div className="flex h-full flex-col items-center justify-center px-6 pb-24">
-          <div className="w-full max-w-md text-center">
-            <span className="otto-text-label mb-3 block tracking-[0.3em] text-otto-gold">
-              Otto AI
-            </span>
-            <h1 className="otto-text-display text-otto-text">
-              Billionaire-grade stock research
-            </h1>
-            <p className="otto-text-body mt-3 text-otto-text-muted">
-              Undervalued businesses, real fundamentals, no fluff. Ask about any ticker.
-            </p>
-          </div>
-        </div>
+        <LandingHero onStart={() => inputRef.current?.focus()} onExample={(text) => send(text)} />
       ) : (
         <div
           ref={scrollRef}
@@ -329,19 +323,6 @@ export function ChatApp() {
 
       <div className="otto-material-thick absolute inset-x-0 bottom-0 border-t px-4 pb-6 pt-4 sm:px-0">
         <div className="mx-auto w-full max-w-2xl">
-          {isEmpty && (
-            <div className="mb-4 flex flex-wrap justify-center gap-2">
-              {EXAMPLES.map((ex) => (
-                <button
-                  key={ex}
-                  onClick={() => send(ex)}
-                  className="rounded-full border border-otto-border px-3 py-1.5 text-xs text-otto-text-muted hover:border-otto-text-faint hover:text-otto-text"
-                >
-                  {ex}
-                </button>
-              ))}
-            </div>
-          )}
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -351,6 +332,7 @@ export function ChatApp() {
           >
             <PresetMenu disabled={pending} onSelect={(query) => send(query)} />
             <input
+              ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Ask Otto about a stock…"

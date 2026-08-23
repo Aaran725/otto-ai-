@@ -303,3 +303,78 @@ button:active {
     transform: none;
   }
 }
+
+/* Liquid Glass — a pointer-reactive specular highlight layered over the
+   flat translucent .otto-material, tracked via --mx/--my custom properties
+   (updated on mousemove by the component). A step beyond static frosted
+   glass: light actually seems to move across the surface. Falls back to a
+   fixed highlight position when nothing updates the coordinates (touch,
+   no JS). */
+.otto-glass {
+  position: relative;
+  --mx: 50%;
+  --my: 30%;
+  isolation: isolate;
+}
+.otto-glass::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(circle at var(--mx) var(--my), rgba(255, 255, 255, 0.16), transparent 45%);
+  opacity: 0.9;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Ambient light field — slow-drifting gold/verdict-color blobs behind hero
+   content, so the Liquid Glass surfaces above have something real to
+   refract/tint against instead of floating over flat black. */
+.otto-ambient-field {
+  position: absolute;
+  inset: -15%;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(circle at 22% 28%, color-mix(in srgb, var(--otto-gold) 20%, transparent), transparent 42%),
+    radial-gradient(circle at 78% 65%, color-mix(in srgb, var(--otto-bull) 14%, transparent), transparent 42%);
+  filter: blur(70px);
+  animation: otto-ambient-drift 20s ease-in-out infinite alternate;
+}
+@keyframes otto-ambient-drift {
+  from {
+    transform: translate(-2%, -2%) scale(1);
+  }
+  to {
+    transform: translate(2%, 2%) scale(1.06);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .otto-ambient-field {
+    animation: none;
+  }
+}
+
+/* Liquid entrance — landing content condenses in from a blurred/scaled
+   state instead of a plain fade, like droplets coalescing rather than a
+   card sliding up. Reserved for the landing hero specifically. */
+@keyframes otto-liquid-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(14px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    filter: blur(0);
+  }
+}
+.otto-liquid-in {
+  animation: otto-liquid-in 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .otto-liquid-in {
+    animation: none;
+  }
+}
