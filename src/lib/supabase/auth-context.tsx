@@ -27,7 +27,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     supabase.auth
       .getSession()
       .then(({ data, error }) => {
-        if (error) console.error("[auth] getSession failed:", error.message);
+        console.log("[auth] getSession result — session:", Boolean(data.session), "user:", data.session?.user?.email, "error:", error?.message);
         setUser(data.session?.user ?? null);
         setLoading(false);
       })
@@ -38,7 +38,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     // Keeps `user` in sync across sign-in/out and token refresh, including
     // tab-to-tab changes (e.g. signing out in one tab reflects in another).
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
+      console.log("[auth] onAuthStateChange:", event, "user:", session?.user?.email);
       setUser(session?.user ?? null);
       setLoading(false);
     });
