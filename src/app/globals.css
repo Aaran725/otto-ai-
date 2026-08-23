@@ -1,26 +1,305 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Near-black with a whisper of cool undertone — macOS's true dark
+     surfaces read as neutral-to-cool graphite, not the saturated navy-black
+     these tokens used to carry. Verdict colors (bull/bear/gold) are the
+     app's real accent system and are untouched here. */
+  --otto-bg: #0a0a0c;
+  --otto-bg-raised: #131316;
+  --otto-border: #232327;
+  --otto-border-soft: #1a1a1d;
+  --otto-text: #f5f5f7;
+  --otto-text-muted: #98989d;
+  --otto-text-faint: #636366;
+
+  --otto-bull: #10b981;
+  --otto-bull-soft: #10b98126;
+  --otto-bear: #f43f5e;
+  --otto-bear-soft: #f43f5e26;
+  --otto-gold: #d4af37;
+  --otto-gold-soft: #d4af3726;
+
+  /* Translucent "materials" — surfaces let the room's color show through
+     instead of sitting on it as flat opaque panels. */
+  --otto-material: rgba(19, 19, 22, 0.66);
+  --otto-material-thick: rgba(11, 11, 13, 0.78);
+  --otto-material-border: rgba(255, 255, 255, 0.09);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-background: var(--otto-bg);
+  --color-foreground: var(--otto-text);
+
+  --color-otto-bg: var(--otto-bg);
+  --color-otto-bg-raised: var(--otto-bg-raised);
+  --color-otto-border: var(--otto-border);
+  --color-otto-border-soft: var(--otto-border-soft);
+  --color-otto-text: var(--otto-text);
+  --color-otto-text-muted: var(--otto-text-muted);
+  --color-otto-text-faint: var(--otto-text-faint);
+
+  --color-otto-bull: var(--otto-bull);
+  --color-otto-bull-soft: var(--otto-bull-soft);
+  --color-otto-bear: var(--otto-bear);
+  --color-otto-bear-soft: var(--otto-bear-soft);
+  --color-otto-gold: var(--otto-gold);
+  --color-otto-gold-soft: var(--otto-gold-soft);
+
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+body {
+  background: var(--otto-bg);
+  color: var(--otto-text);
+  font-family: -apple-system, "SF Pro Display", "SF Pro Text", system-ui, var(--font-sans), sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Type scale — display / title / body / caption / label. A small fixed set
+   instead of hand-picking text-sm/text-xs + tracking per component, so
+   weight/size jumps read as one deliberate hierarchy (Apple's sharp
+   headline-vs-body contrast) rather than incidental variation. */
+.otto-text-display {
+  font-size: 1.875rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+.otto-text-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+.otto-text-body {
+  font-size: 0.875rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.55;
+}
+.otto-text-caption {
+  font-size: 0.75rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+.otto-text-label {
+  font-size: 0.625rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  line-height: 1.2;
+}
+
+* {
+  border-color: var(--otto-border);
+}
+
+::selection {
+  background: var(--otto-gold-soft);
+  color: var(--otto-text);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Frosted-glass surfaces — a card/sheet/bar reads as content sitting on a
+   translucent layer over the room, not a flat opaque box. `-thick` is for
+   surfaces that need to stay legible over dense scrolling content behind
+   them (sheets, overlays, the input bar); the regular variant is for cards
+   that sit inline in the flow. */
+.otto-material {
+  background: var(--otto-material);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border-color: var(--otto-material-border);
+}
+.otto-material-thick {
+  background: var(--otto-material-thick);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  border-color: var(--otto-material-border);
+}
+
+/* Apple's signature spring — a touch of overshoot then settle, not a flat
+   ease. Used for every arrival/expansion in the app instead of linear or
+   ease-in-out curves, so motion reads as physical rather than programmatic. */
+:root {
+  --otto-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Otto's cards arrive, they don't just appear — staggered by the caller via
+   animation-delay on this same class. */
+@keyframes otto-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.otto-arrive {
+  animation: otto-arrive 0.5s var(--otto-spring) both;
+}
+
+/* Expand: the compact card growing into the tabbed sheet — scales up from
+   slightly smaller with a spring overshoot, instead of an instant swap. */
+@keyframes otto-expand {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+.otto-expand {
+  animation: otto-expand 0.5s var(--otto-spring) both;
+  transform-origin: top center;
+}
+
+/* Collapse: the sheet settling back down into the compact card. */
+@keyframes otto-collapse {
+  from {
+    opacity: 0;
+    transform: scale(1.03);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.otto-collapse {
+  animation: otto-collapse 0.42s var(--otto-spring) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .otto-arrive,
+  .otto-expand,
+  .otto-collapse {
+    animation: none;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* Ambient verdict-colored edge glow — quiet by default, present on hover,
+   so a card reads as bullish/bearish at a glance instead of needing the
+   verdict pill read first. */
+.otto-glow-bull {
+  box-shadow: 0 0 0 1px var(--otto-bull-soft), 0 0 24px -8px var(--otto-bull-soft);
+  transition: box-shadow 0.4s var(--otto-spring);
+}
+.otto-glow-bull:hover {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--otto-bull) 45%, transparent), 0 0 32px -6px color-mix(in srgb, var(--otto-bull) 55%, transparent);
+}
+.otto-glow-bear {
+  box-shadow: 0 0 0 1px var(--otto-bear-soft), 0 0 24px -8px var(--otto-bear-soft);
+  transition: box-shadow 0.4s var(--otto-spring);
+}
+.otto-glow-bear:hover {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--otto-bear) 45%, transparent), 0 0 32px -6px color-mix(in srgb, var(--otto-bear) 55%, transparent);
+}
+.otto-glow-neutral {
+  transition: box-shadow 0.4s var(--otto-spring);
+}
+.otto-glow-neutral:hover {
+  box-shadow: 0 0 0 1px var(--otto-gold-soft), 0 0 24px -8px var(--otto-gold-soft);
+}
+
+/* Grouped-inset list — a Settings-app style rounded card holding rows with
+   hairline dividers, instead of a bare table or a plain divide-y list
+   floating with no container. */
+.otto-list-group {
+  border-radius: 1rem;
+  border: 1px solid var(--otto-border-soft);
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+}
+.otto-list-row {
+  padding: 0.875rem 1rem;
+  border-bottom: 1px solid var(--otto-border-soft);
+}
+.otto-list-row:last-child {
+  border-bottom: none;
+}
+
+/* Segmented control — a pill track with a sliding selected-segment thumb,
+   used for tab bars and view toggles instead of plain buttons/underlines. */
+.otto-segmented {
+  position: relative;
+  display: flex;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 3px;
+}
+.otto-segmented-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  border-radius: 9999px;
+  background: var(--otto-gold);
+  transition: left 0.4s var(--otto-spring), width 0.4s var(--otto-spring);
+}
+@media (prefers-reduced-motion: reduce) {
+  .otto-segmented-thumb {
+    transition: none;
+  }
+}
+
+/* Elevation — layered, soft shadow stacks (a tight contact shadow + a wide
+   diffuse one) instead of one hard drop-shadow, plus a thin inset top
+   highlight that sells "this is a raised surface" the way macOS panels
+   catch light along their top edge. Uses `filter: drop-shadow()` rather
+   than `box-shadow` so it composes with the verdict glow classes (which
+   already own `box-shadow`) instead of overwriting them. */
+.otto-elevation-resting {
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.22));
+}
+.otto-elevation-raised {
+  filter: drop-shadow(0 8px 20px rgba(0, 0, 0, 0.4)) drop-shadow(0 2px 6px rgba(0, 0, 0, 0.3));
+}
+.otto-elevation-floating {
+  filter: drop-shadow(0 24px 56px rgba(0, 0, 0, 0.55)) drop-shadow(0 8px 20px rgba(0, 0, 0, 0.4));
+}
+
+/* Hover-lift for interactive cards — a small physical nudge toward the
+   viewer, paired with a deeper shadow so the lift reads as real elevation
+   change rather than just a color shift. */
+.otto-lift {
+  transition: transform 0.35s var(--otto-spring), filter 0.35s var(--otto-spring);
+}
+.otto-lift:hover {
+  transform: translateY(-3px);
+  filter: drop-shadow(0 14px 28px rgba(0, 0, 0, 0.45)) drop-shadow(0 4px 10px rgba(0, 0, 0, 0.35));
+}
+@media (prefers-reduced-motion: reduce) {
+  .otto-lift {
+    transition: none;
+  }
+  .otto-lift:hover {
+    transform: none;
+  }
+}
+
+/* Press feedback — every button compresses subtly on press and springs
+   back on release, the tactile "this responded to my tap" Apple UI always
+   has. Applied app-wide at the element level rather than per-component. */
+button {
+  transition: transform 0.15s var(--otto-spring);
+}
+button:active {
+  transform: scale(0.97);
+}
+@media (prefers-reduced-motion: reduce) {
+  button {
+    transition: none;
+  }
+  button:active {
+    transform: none;
+  }
 }
