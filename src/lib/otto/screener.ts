@@ -16,6 +16,8 @@ import { fetchRiskFactorExcerpt } from "./sec-edgar";
 import { fetchMacroContext } from "./fred";
 import { fetchPeerValuation } from "./peers";
 import { fetchYahooPriceTarget } from "./yahoo";
+import { fetchEarningsRecord, type EarningsRecord } from "./earnings";
+import { fetchShortInterest, type ShortInterestData } from "./short-interest";
 import type { ProgressFn } from "./chat-types";
 import type { ScreenQueryRequirements } from "./screen-query";
 
@@ -91,13 +93,26 @@ const THEME_TRIGGERS: [RegExp, ThemeFilter][] = [
 
 /** Runs independently of intent detection — "best AI stocks" combines both
  * (rank by "best" weights, restricted to AI-industry candidates); "AI
- * stocks" alone defaults to the "best" intent with the theme applied. */
+ * stocks" alone defaults to the "best" intent with the theme applied.
+ * Multiple named sectors ("AI healthcare stocks") combine into one merged
+ * filter matching EITHER industry — no real company is classified under two
+ * industries at once, so this is an OR, not a requirement to match both. */
 export function detectThemeFilter(message: string): ThemeFilter | null {
   const m = message.toLowerCase();
+  const matched: ThemeFilter[] = [];
   for (const [pattern, theme] of THEME_TRIGGERS) {
-    if (pattern.test(m)) return theme;
+    if (pattern.test(m) && !matched.includes(theme)) matched.push(theme);
   }
-  return null;
+  if (matched.length === 0) return null;
+  if (matched.length === 1) return matched[0];
+  return {
+    label: matched.map((t) => t.label).join(" + "),
+    key: matched
+      .map((t) => t.key)
+      .sort()
+      .join("-"),
+    industryMatch: new RegExp(matched.map((t) => t.industryMatch.source).join("|"), "i"),
+  };
 }
 
 export interface CapFilter {
@@ -587,9 +602,12 @@ export async function runScreener(
 
     const ratingTrendBySymbol = new Map<string, { direction: "improving" | "worsening" | "flat"; delta: number }>();
     const sectorPercentileBySymbol = new Map<string, number>();
+    const earningsBySymbol = new Map<string, EarningsRecord>();
+    const shortInterestBySymbol = new Map<string, ShortInterestData>();
+    const industryBySymbol = new Map<string, string | null>();
 
     const withInsider = await mapWithConcurrency(semifinalists, 4, async (candidate) => {
-      const [activity, trend, fundamentals, financialsTrend, snap, priceTarget] = await Promise.all([
+      const [activity, trend, fundamentals, financialsTrend, snap, priceTarget, earnings, shortInterest, profile] = await Promise.all([
         fetchInsiderActivity(candidate.symbol).catch(() => null),
         fetchFinnhubRatingTrend(candidate.symbol).catch(() => null),
         fetchFinnhubFundamentals(candidate.symbol).catch(() => null),
@@ -606,8 +624,22 @@ export async function runScreener(
         // momentum/"rocket" screen specifically (see FORECAST_UPSIDE_NUDGE
         // below), not just a minor tiebreaker like the others here.
         fetchYahooPriceTarget(candidate.symbol).catch(() => null),
+        // Real beat/miss record — the same signal already computed for
+        // single-stock analysis (groq.ts), reused here at zero new
+        // integration cost. Consistent execution is a real quality signal a
+        // desk would weigh before finalizing a list.
+        fetchEarningsRecord(candidate.symbol).catch(() => null),
+        // Real FINRA short-interest data, same reuse — high/rising short
+        // interest is a genuine risk flag regardless of screen intent.
+        fetchShortInterest(candidate.symbol).catch(() => null),
+        // Real industry classification for the sector-diversification pass
+        // below — cheap, already used for theme/cap classification earlier.
+        fetchFinnhubProfile2(candidate.symbol).catch(() => null),
       ]);
       if (trend) ratingTrendBySymbol.set(candidate.symbol, trend);
+      if (earnings) earningsBySymbol.set(candidate.symbol, earnings);
+      if (shortInterest) shortInterestBySymbol.set(candidate.symbol, shortInterest);
+      industryBySymbol.set(candidate.symbol, profile?.industry ?? null);
       const pe = fundamentals?.ratios?.priceToEarningsRatio;
       if (pe !== undefined) {
         const peerValuation = await fetchPeerValuation(candidate.symbol, pe).catch(() => null);
@@ -683,6 +715,8 @@ export async function runScreener(
     const RATING_TREND_NUDGE = 3;
     const SECTOR_NUDGE_MAX = 4; // scaled by percentile: cheapest-vs-peers = full nudge, priciest = full penalty
     const FORECAST_UPSIDE_NUDGE_MAX = intent === "momentum" ? 16 : 6; // scaled by upside%, capped at +/-50%
+    const EARNINGS_NUDGE_MAX = 3; // scaled by beat/miss ratio over the last up-to-4 reported quarters
+    const SHORT_INTEREST_NUDGE_MAX = 3; // high/rising short interest is a red flag regardless of intent
     function rankKey(c: ScreenerCandidate): number {
       let key = c.compositeScore + clusterNudgeFor(c.symbol);
       if (c.insiderActivity?.direction === "buying") key += INSIDER_NUDGE;
@@ -696,15 +730,63 @@ export async function runScreener(
         const clamped = Math.max(-50, Math.min(50, c.forecastUpsidePct));
         key += (clamped / 50) * FORECAST_UPSIDE_NUDGE_MAX;
       }
+      const earnings = earningsBySymbol.get(c.symbol);
+      if (earnings) {
+        const total = earnings.beatCount + earnings.missCount;
+        if (total > 0) key += ((earnings.beatCount - earnings.missCount) / total) * EARNINGS_NUDGE_MAX;
+      }
+      const shortInterest = shortInterestBySymbol.get(c.symbol);
+      if (shortInterest) {
+        // Real risk read, not a fabricated threshold: >5 days-to-cover is
+        // already a stretched short position by normal-liquidity standards,
+        // and short interest growing >10% since the prior settlement means
+        // bearish conviction is actively building, not just elevated.
+        let riskFlags = 0;
+        if (shortInterest.daysToCover > 5) riskFlags += 1;
+        if (shortInterest.daysToCover > 10) riskFlags += 1;
+        if (shortInterest.changePercent > 10) riskFlags += 1;
+        key -= (Math.min(riskFlags, 3) / 3) * SHORT_INTEREST_NUDGE_MAX;
+      }
       return key;
     }
 
-    const finalists = [...withInsider, ...rest]
-      .sort((a, b) => {
-        if (a.thinCoverage !== b.thinCoverage) return a.thinCoverage ? 1 : -1;
-        return ascending ? rankKey(a) - rankKey(b) : rankKey(b) - rankKey(a);
-      })
-      .slice(0, 5);
+    // Sector diversification: a real desk wouldn't hand back 5 correlated
+    // mega-cap tech names just because they all scored well on the same
+    // axis. Greedy pass through the rank-sorted list, capping how many
+    // picks share one Finnhub industry classification — a skipped candidate
+    // still gets backfilled if the cap leaves the final list short, since a
+    // real pick always beats an empty slot.
+    const SECTOR_CAP = 2;
+    function selectDiversified(sorted: ScreenerCandidate[], limit: number): ScreenerCandidate[] {
+      const selected: ScreenerCandidate[] = [];
+      const sectorCounts = new Map<string, number>();
+      const skipped: ScreenerCandidate[] = [];
+      for (const c of sorted) {
+        if (selected.length >= limit) break;
+        const sector = industryBySymbol.get(c.symbol) ?? null;
+        const count = sector ? (sectorCounts.get(sector) ?? 0) : 0;
+        if (sector && count >= SECTOR_CAP) {
+          skipped.push(c);
+          continue;
+        }
+        selected.push(c);
+        if (sector) sectorCounts.set(sector, count + 1);
+      }
+      for (const c of skipped) {
+        if (selected.length >= limit) break;
+        selected.push(c);
+      }
+      return selected;
+    }
+
+    const rankedFinalists = [...withInsider, ...rest].sort((a, b) => {
+      if (a.thinCoverage !== b.thinCoverage) return a.thinCoverage ? 1 : -1;
+      return ascending ? rankKey(a) - rankKey(b) : rankKey(b) - rankKey(a);
+    });
+    // "avoid" isn't a picks list — if a sector genuinely has the most red
+    // flags, showing more than 2 from it is the honest answer, not a flaw
+    // to correct for.
+    const finalists = intent === "avoid" ? rankedFinalists.slice(0, 5) : selectDiversified(rankedFinalists, 5);
 
     // Stage 4: only the actual final 5 get a real 10-K excerpt — purely
     // presentational (doesn't affect ranking, unlike the insider check),
