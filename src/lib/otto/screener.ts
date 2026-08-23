@@ -16,6 +16,7 @@ import { fetchRiskFactorExcerpt } from "./sec-edgar";
 import { fetchMacroContext } from "./fred";
 import { fetchPeerValuation } from "./peers";
 import type { ProgressFn } from "./chat-types";
+import type { ScreenQueryRequirements } from "./screen-query";
 
 export type ScreenIntent = "undervalued" | "momentum" | "best" | "quality" | "avoid";
 
@@ -195,8 +196,31 @@ const MOMENTUM_UNIVERSE_CAP_FLOOR_MILLIONS = 300;
 async function sourceCandidates(
   intent: ScreenIntent,
   theme: ThemeFilter | null,
-  capFilter: CapFilter | null = null
+  capFilter: CapFilter | null = null,
+  seedTickers: { symbol: string; companyName: string }[] = []
 ): Promise<{ symbol: string; companyName: string }[]> {
+  // seedTickers come from the LLM query-interpreter (see screen-query.ts) —
+  // already independently verified against a live quote before reaching
+  // here, so they're unioned straight into the pool regardless of source,
+  // bypassing the industry-keyword classify (which is too coarse to catch a
+  // specific niche like "physical AI" on its own — Tesla's Finnhub industry
+  // is "Auto Manufacturers", not "robotics"). A capFilter is still honored
+  // for seeds so "mega cap physical AI stocks" doesn't let a small-cap seed
+  // through.
+  async function unionSeeds(pool: { symbol: string; companyName: string }[]) {
+    if (seedTickers.length === 0) return pool;
+    const merged = new Map(pool.map((c) => [c.symbol, c]));
+    for (const s of seedTickers) {
+      if (merged.has(s.symbol)) continue;
+      if (capFilter) {
+        const { marketCapMillions } = await fetchFinnhubProfile2(s.symbol);
+        if (marketCapMillions === null || marketCapMillions < capFilter.minMarketCapMillions) continue;
+      }
+      merged.set(s.symbol, s);
+    }
+    return [...merged.values()];
+  }
+
   if (intent === "momentum") {
     const [gainers, active, universe] = await Promise.all([
       fetchBiggestGainers(),
@@ -217,7 +241,7 @@ async function sourceCandidates(
     });
     for (const c of classified) if (c) merged.set(c.symbol, c);
 
-    return [...merged.values()];
+    return unionSeeds([...merged.values()]);
   }
 
   const universe = await fetchSecUniverse(1000);
@@ -229,7 +253,11 @@ async function sourceCandidates(
   // Widened again once per-symbol score caching (getSymbolScoreCache) meant
   // a symbol scanned by one screen is free the next time any other screen
   // scans it — the budget that pays for wider coverage.
-  if (!theme && !capFilter) return buildCandidatePool(companies, 450);
+  // A seed-only request (theme/cap absent but the LLM named specific real
+  // companies) must NOT also fall through to the full unfiltered market —
+  // that would dilute a focused custom screen with random unrelated names
+  // that just happened to score well on generic fundamentals.
+  if (!theme && !capFilter) return seedTickers.length > 0 ? unionSeeds([]) : unionSeeds(buildCandidatePool(companies, 450));
 
   // Theme/cap screens need a much wider initial sample since most
   // candidates get filtered out (a 40-ticker sample only turned up 1 AI
@@ -246,7 +274,7 @@ async function sourceCandidates(
     }
     return c;
   });
-  return classified.filter((c): c is { symbol: string; companyName: string } => c !== null).slice(0, 50);
+  return unionSeeds(classified.filter((c): c is { symbol: string; companyName: string } => c !== null).slice(0, 50));
 }
 
 /**
@@ -429,13 +457,44 @@ function buildKeyStat(
  * Cached 4h per intent bucket so repeated "what's undervalued" questions
  * from anyone share one scan.
  */
+function passesRequirements(snap: Pick<SymbolSnapshot, "ratios" | "keyMetrics">, req: ScreenQueryRequirements | null): boolean {
+  if (!req) return true;
+  if (req.maxPE !== undefined) {
+    const pe = snap.ratios?.priceToEarningsRatio;
+    if (pe === undefined || pe > req.maxPE) return false;
+  }
+  if (req.minRevenueGrowthPct !== undefined) {
+    const g = snap.ratios?.revenueGrowthYoY;
+    if (g === undefined || g * 100 < req.minRevenueGrowthPct) return false;
+  }
+  if (req.minROICPct !== undefined) {
+    const r = snap.keyMetrics?.returnOnInvestedCapital;
+    if (r === undefined || r * 100 < req.minROICPct) return false;
+  }
+  if (req.minFCFYieldPct !== undefined) {
+    const f = snap.keyMetrics?.freeCashFlowYield;
+    if (f === undefined || f * 100 < req.minFCFYieldPct) return false;
+  }
+  return true;
+}
+
 export async function runScreener(
   intent: ScreenIntent,
   theme: ThemeFilter | null = null,
   capFilter: CapFilter | null = null,
-  onProgress?: ProgressFn
+  onProgress?: ProgressFn,
+  seedTickers: { symbol: string; companyName: string }[] = [],
+  requirements: ScreenQueryRequirements | null = null
 ): Promise<ScreenerCandidate[]> {
-  const cacheKey = [intent, theme?.key, capFilter?.key].filter(Boolean).join(":");
+  const cacheKey = [
+    intent,
+    theme?.key,
+    capFilter?.key,
+    seedTickers.length ? `seed:${seedTickers.map((s) => s.symbol).sort().join(",")}` : null,
+    requirements ? `req:${JSON.stringify(requirements)}` : null,
+  ]
+    .filter(Boolean)
+    .join(":");
   // On a cache hit nothing below runs, so no progress events fire — the
   // scan really is instant then, not staged for show.
   return getScreenerCache<ScreenerCandidate[]>().getOrSet(cacheKey, async () => {
@@ -443,7 +502,7 @@ export async function runScreener(
     // feed are both ticker-agnostic — fetched once per scan, in parallel
     // with sourcing the pool, not once per candidate.
     const [pool, macro, clusterFeed] = await Promise.all([
-      sourceCandidates(intent, theme, capFilter),
+      sourceCandidates(intent, theme, capFilter, seedTickers),
       fetchMacroContext().catch(() => null),
       fetchInsiderClusterFeed().catch(() => [] as InsiderClusterEntry[]),
     ]);
@@ -472,6 +531,7 @@ export async function runScreener(
         // window even across different screens (see getSymbolScoreCache).
         const snap = await getSymbolSnapshot(c.symbol);
         if (!snap) return null;
+        if (!passesRequirements(snap, requirements)) return null;
         return {
           symbol: c.symbol,
           companyName: c.companyName,

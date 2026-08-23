@@ -98,7 +98,7 @@ function getGroqKeys(): string[] {
   ].filter((k): k is string => Boolean(k));
 }
 
-async function withKeyRotation<T>(fn: (client: Groq) => Promise<T>): Promise<T> {
+export async function withKeyRotation<T>(fn: (client: Groq) => Promise<T>): Promise<T> {
   const keys = getGroqKeys();
   if (keys.length === 0) throw new Error("No GROQ_API_KEY configured");
 

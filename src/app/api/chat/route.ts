@@ -1,8 +1,9 @@
 import { fetchStockBundle } from "@/lib/otto/fmp";
 import { runOttoAnalysis, runOttoFollowUp } from "@/lib/otto/groq";
-import { resolveTickerFromText } from "@/lib/otto/resolve-ticker";
+import { resolveExplicitTicker, resolveTickerByFuzzyName, type ResolvedTicker } from "@/lib/otto/resolve-ticker";
 import { looksLikeFreshRequest, detectFollowUpTopic, buildFollowUpVisual } from "@/lib/otto/followup-intent";
-import { detectScreenIntent, detectThemeFilter, detectCapFilter, intentLabel, runScreener } from "@/lib/otto/screener";
+import { detectScreenIntent, detectThemeFilter, detectCapFilter, intentLabel, runScreener, type CapFilter } from "@/lib/otto/screener";
+import { interpretScreenQuery, themeQueryToFilter, verifySeedTickers } from "@/lib/otto/screen-query";
 import type { ChatRequestBody, ChatStreamEvent, ProgressFn } from "@/lib/otto/chat-types";
 
 /**
@@ -40,52 +41,84 @@ export async function POST(request: Request) {
       try {
         const lastCard = [...history].reverse().find((m) => m.role === "assistant" && m.card)?.card;
 
-        // A ticker mentioned in a question about the stock we're already
-        // discussing ("what's your forecast for UBER") is a follow-up, not a
-        // request to regenerate the card — only re-run the full pipeline when
-        // there's no existing card for this ticker, or the message is an
-        // explicit fresh/refresh request.
-        // Screen signal is computed before ticker resolution: a screen-y
-        // phrase ("mega cap stocks", "any rocket stocks?", "massive upside
-        // potential") often shares a word with a real company/ticker name
-        // ("Apple", "Rocket Companies", ...) — resolving the whole message
-        // as a fuzzy company-name search would misroute the entire request
-        // to that one ticker instead of running the screener. When a screen
-        // is detected, ticker resolution only trusts explicit $TICKER / ALL-
-        // CAPS signals, not the fuzzy whole-message name match.
-        const theme = detectThemeFilter(message);
-        const capFilter = detectCapFilter(message);
-        // A theme/cap filter alone ("AI stocks", "mega cap stocks") with no
-        // explicit intent word defaults to "best" — momentum stays momentum
-        // even with a filter, since "hot AI stocks" should still mean
-        // momentum-ranked, not composite.
-        const screenIntent = detectScreenIntent(message) ?? (theme || capFilter ? "best" : null);
-
-        const resolved = await resolveTickerFromText(message, { skipFuzzyNameMatch: !!screenIntent });
-        const isNewTicker = resolved && resolved.symbol !== lastCard?.ticker;
-        const wantsFreshAnalysis = resolved && (isNewTicker || looksLikeFreshRequest(message));
-
-        if (wantsFreshAnalysis && resolved) {
+        async function runFreshAnalysis(resolved: ResolvedTicker) {
           const emit: ProgressFn = (update) => send({ type: "status", ...update });
           const bundle = await fetchStockBundle(resolved.symbol, emit);
           const analysis = await runOttoAnalysis(resolved.symbol, bundle, emit);
           send({ type: "done", reply: analysis.oneLiner, card: analysis });
           controller.close();
-          return;
         }
 
-        // No specific ticker named — "what's undervalued", "your pick",
-        // "rocket stock" etc. should screen the market, not fall through to
-        // a generic "give me a ticker" prompt or a stale follow-up about
-        // whatever was discussed last.
-        if (!resolved) {
+        // A ticker mentioned in a question about the stock we're already
+        // discussing ("what's your forecast for UBER") is a follow-up, not a
+        // request to regenerate the card — only re-run the full pipeline when
+        // there's no existing card for this ticker, or the message is an
+        // explicit fresh/refresh request. Explicit signals ($TICKER, or a
+        // literal ALL-CAPS token the user typed) are trusted immediately —
+        // unambiguous, unlike the fuzzy whole-message company-name match
+        // below, which needs a screen-request check to run first.
+        const explicitTicker = await resolveExplicitTicker(message);
+        if (explicitTicker) {
+          const isNewTicker = explicitTicker.symbol !== lastCard?.ticker;
+          if (isNewTicker || looksLikeFreshRequest(message)) {
+            await runFreshAnalysis(explicitTicker);
+            return;
+          }
+        }
+
+        if (!explicitTicker) {
+          const themeRegex = detectThemeFilter(message);
+          const capFilterRegex = detectCapFilter(message);
+          // A theme/cap filter alone ("AI stocks", "mega cap stocks") with no
+          // explicit intent word defaults to "best" — momentum stays momentum
+          // even with a filter, since "hot AI stocks" should still mean
+          // momentum-ranked, not composite.
+          const screenIntentRegex = detectScreenIntent(message) ?? (themeRegex || capFilterRegex ? "best" : null);
+
+          // No specific ticker named — "what's undervalued", "your pick",
+          // "rocket stock", "physical AI stocks", "P/E under 30 cybersecurity
+          // stocks" etc. should screen the market. The fixed 6-theme regex
+          // list only covers common cases — an LLM classifier (never trusted
+          // for actual financial data, only for turning free text into a
+          // structured query) refines or replaces it so an arbitrary niche
+          // the regex list was never going to enumerate ("physical AI",
+          // "quantum computing") still gets a real screen. This check runs
+          // BEFORE the fuzzy whole-message ticker match below — a screen-y
+          // phrase regularly shares a word with a real company name ("Apple",
+          // "Rocket", "Under [Armour]") and would otherwise get misrouted to
+          // that one ticker instead of running the screener.
+          const interpreted = await interpretScreenQuery(message);
+          // interpreted === null only on a failed LLM call (rate limit,
+          // network) — fall back to the regex-detected read. A successful
+          // call is trusted as-is, including an explicit "not a screen"
+          // (intent: null) even if the regex thought otherwise.
+          const screenIntent = interpreted ? interpreted.intent : screenIntentRegex;
+          const theme = interpreted ? (interpreted.theme ? themeQueryToFilter(interpreted.theme) : null) : themeRegex;
+          let capFilter: CapFilter | null = capFilterRegex;
+          if (interpreted?.minMarketCapMillions) {
+            capFilter = {
+              label: `$${Math.round(interpreted.minMarketCapMillions / 1000)}B+ cap`,
+              key: `cap-${interpreted.minMarketCapMillions}`,
+              minMarketCapMillions: interpreted.minMarketCapMillions,
+            };
+          }
+          const seedTickers = interpreted?.seedTickers?.length ? await verifySeedTickers(interpreted.seedTickers) : [];
+          const requirements = interpreted?.requirements ?? null;
+
           if (screenIntent) {
-            const results = await runScreener(screenIntent, theme, capFilter, (update) => send({ type: "status", ...update }));
+            const results = await runScreener(
+              screenIntent,
+              theme,
+              capFilter,
+              (update) => send({ type: "status", ...update }),
+              seedTickers,
+              requirements
+            );
             if (results.length === 0) {
-              send({
-                type: "done",
-                reply: "Couldn't screen the market right now — data provider is temporarily unavailable, or no matches for that filter. Try again shortly, or ask about a specific ticker.",
-              });
+              const reply = requirements
+                ? "Screened the market, but nothing currently trading meets all of those requirements together — try loosening one (a lower growth bar, or a higher P/E ceiling)."
+                : "Couldn't screen the market right now — data provider is temporarily unavailable, or no matches for that filter. Try again shortly, or ask about a specific ticker.";
+              send({ type: "done", reply });
               controller.close();
               return;
             }
@@ -102,6 +135,15 @@ export async function POST(request: Request) {
               },
             });
             controller.close();
+            return;
+          }
+
+          // Confirmed not a screen — now safe to try the fuzzy whole-message
+          // company-name match ("tell me about the ride-sharing company
+          // Uber" with no explicit ticker typed).
+          const fuzzyTicker = await resolveTickerByFuzzyName(message);
+          if (fuzzyTicker) {
+            await runFreshAnalysis(fuzzyTicker);
             return;
           }
         }
