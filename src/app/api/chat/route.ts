@@ -107,11 +107,19 @@ export async function POST(request: Request) {
           // necessarily mean "not a screen" — the model can (and does, e.g.
           // "search for stocks with inside rbuying") correctly extract a
           // real constraint like requiresInsiderBuying/theme/requirements
-          // while leaving intent unset. Any of those signals still means
-          // "screen the market", defaulting to "best" the same way the
-          // regex path already does for a bare theme/cap filter.
+          // while leaving intent unset. When that happens, fall back to the
+          // regex-detected intent BEFORE defaulting to "best" — confirmed
+          // live: "where does otto disagree with wall street" correctly
+          // regex-matched "contrarian", but the LLM prompt (written before
+          // that intent existed) didn't recognize it and returned intent:
+          // null with no other signal, so the merge discarded the correct
+          // regex read entirely and fell through to fuzzy ticker matching,
+          // misrouting to STT ("State Street") instead of running the
+          // screen. A regex-detected intent is a real signal on its own,
+          // not just an LLM-outage fallback.
           const screenIntent = interpreted
             ? (interpreted.intent ??
+              screenIntentRegex ??
               (theme || capFilter !== capFilterRegex || seedTickers.length || requirements || requireInsiderBuying ? "best" : null))
             : screenIntentRegex;
 
@@ -140,7 +148,9 @@ export async function POST(request: Request) {
                     ? "Screened the market, but nothing right now clears the bar for genuinely undervalued — at least 15% real forecast upside to target, not just a cheap-looking ratio. Try again later as prices move, or ask about a specific ticker."
                     : screenIntent === "best"
                       ? "Screened the market, but nothing right now clears Otto's conviction bar for a top pick — either the data was too thin to trust, or a real red flag (insider selling plus a worsening analyst trend) knocked out the leading candidates. Try again later, or ask about a specific ticker."
-                      : "Couldn't screen the market right now — data provider is temporarily unavailable, or no matches for that filter. Try again shortly, or ask about a specific ticker.";
+                      : screenIntent === "contrarian"
+                        ? "Screened the market, but Otto and Wall Street are largely in agreement right now — nothing cleared a real 20-point gap between Otto's own forecast and the analyst consensus. That's a legitimate result, not a data hiccup; try again later as forecasts update."
+                        : "Couldn't screen the market right now — data provider is temporarily unavailable, or no matches for that filter. Try again shortly, or ask about a specific ticker.";
               send({ type: "done", reply });
               controller.close();
               return;
@@ -153,7 +163,7 @@ export async function POST(request: Request) {
             // shorter list as if 5 was never the target — same honesty
             // principle as the zero-results case above.
             const shortListNote =
-              results.length < 5 && (screenIntent === "undervalued" || screenIntent === "best")
+              results.length < 5 && (screenIntent === "undervalued" || screenIntent === "best" || screenIntent === "contrarian")
                 ? ` Only ${results.length} ${results.length === 1 ? "stock" : "stocks"} cleared the bar today — showing real picks only, not padding to 5.`
                 : "";
             send({

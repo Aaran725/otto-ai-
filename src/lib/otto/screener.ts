@@ -24,7 +24,26 @@ import { computeValueScore } from "./value-score";
 import { computeForecastTargets } from "./forecast";
 import { logScreenerCall } from "./screener-track-record";
 
-export type ScreenIntent = "undervalued" | "momentum" | "best" | "quality" | "avoid";
+export type ScreenIntent = "undervalued" | "momentum" | "best" | "quality" | "avoid" | "contrarian";
+
+export interface ScreenerWhyNudge {
+  label: string; // e.g. "Insider buying (90d)", "Sector valuation (12th percentile vs peers)"
+  points: number; // signed contribution to the final score, e.g. +4, -3
+}
+
+/**
+ * The full audit trail behind a pick — every real check, the continuous
+ * value score, and every real-signal nudge with its actual point value.
+ * Only assembled for the final 5 (see runScreener) since it needs the raw
+ * Snowflake axis data most pool candidates never carry past scoring.
+ */
+export interface ScreenerWhyBreakdown {
+  sf: OttoSnowflakeScores;
+  valueScore: number | null;
+  baseScore: number; // axis-weighted + value-score-blended composite, BEFORE real-signal nudges
+  nudges: ScreenerWhyNudge[];
+  finalScore: number; // = compositeScore, after nudges + clamp
+}
 
 export interface ScreenerCandidate {
   symbol: string;
@@ -35,7 +54,12 @@ export interface ScreenerCandidate {
   thinCoverage: boolean; // ranked without real ratios/keyMetrics data behind it
   insiderActivity?: InsiderActivity; // real Form 4 signal, only checked on semifinalists
   filingNote?: string; // real excerpt from the company's own 10-K, only fetched for the final 5
-  forecastUpsidePct?: number; // real analyst-consensus % upside to target price, only checked on semifinalists
+  forecastUpsidePct?: number; // blended analyst+Otto % upside to target price, only checked on semifinalists
+  analystUpsidePct?: number; // real analyst-consensus upside alone, unblended — needed for the "Otto vs Wall Street" divergence screen
+  ottoUpsidePct?: number; // Otto's own deterministic forecast upside alone, unblended — same reason
+  sf?: OttoSnowflakeScores; // raw axis scores/checks, carried through for the "why" breakdown
+  valueScore?: number | null; // continuous cheapness score, carried through for the "why" breakdown
+  whyBreakdown?: ScreenerWhyBreakdown; // assembled only for the final 5
 }
 
 /** Keyword classification — deliberately simple/cheap, no LLM call needed
@@ -47,6 +71,13 @@ export function detectScreenIntent(message: string): ScreenIntent | null {
   if (/\bsafe\b|stable stock|low.?risk|defensive|quality stock/.test(m)) return "quality";
   if (/worst stock|red flag|stocks? to avoid|risky stock|bad stock|what to avoid|\bavoid\b/.test(m)) {
     return "avoid";
+  }
+  if (
+    /otto vs\.?\s*(the )?(wall street|street)|contrarian|disagrees? with (wall street|the street|analysts?)|where (does |is )?otto (disagree|differ)|otto('s)? (own )?take vs/.test(
+      m
+    )
+  ) {
+    return "contrarian";
   }
   if (
     /\bpick\b|\brecommend|best stock|good stock|what should i buy|give me a stock|find (me |us )?(a |some )?(good |great |strong |solid )?stocks?|upside potential|massive (gains|upside|growth|potential)|growth potential|high(est)? potential stock|next (big|great) stock|winning stock|strong stock|stocks? (worth buying|to buy)|invest in/.test(
@@ -64,6 +95,7 @@ const INTENT_LABELS: Record<ScreenIntent, string> = {
   best: "Otto's top picks",
   quality: "Quality & stability picks",
   avoid: "Stocks to avoid",
+  contrarian: "Otto vs. Wall Street",
 };
 
 export function intentLabel(intent: ScreenIntent): string {
@@ -206,6 +238,12 @@ const POOL_CONFIG: Record<ScreenIntent, { anchorSize: number; seedOffset: number
   best: { anchorSize: 50, seedOffset: 0 },
   quality: { anchorSize: 50, seedOffset: 15485863 },
   avoid: { anchorSize: 50, seedOffset: 32452843 },
+  // Divergence data (analyst vs Otto forecast) doesn't exist until Stage 3
+  // enrichment, so there's no way to source by "most likely to diverge" at
+  // Stage 1 — sourced like "best" (broad, prominent, liquid names worth
+  // having two independent forecasts on) and only re-ranked by real
+  // divergence once both numbers are known, further down in runScreener.
+  contrarian: { anchorSize: 50, seedOffset: 50331653 },
 };
 
 // Bounded concurrency for the wide Stage 1 scan — Finnhub's free tier caps
@@ -425,6 +463,11 @@ export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, nu
   // necessarily in valuation or growth, which measure something closer to
   // "is this a good business" than "is this actively getting worse."
   avoid: { financialHealth: 2, momentum: 2, quality: 1, valuation: 0.5, growth: 0.5 },
+  // Balanced, same as "best" — only used for Stage 1/semifinalist sourcing
+  // (see POOL_CONFIG's comment); the real ranking criterion for this
+  // intent is divergence magnitude, applied later once both forecasts
+  // exist, not this fundamentals composite.
+  contrarian: { valuation: 1, growth: 1, quality: 1, financialHealth: 1, momentum: 1 },
 };
 
 export const ASCENDING_INTENTS = new Set<ScreenIntent>(["avoid"]);
@@ -551,6 +594,13 @@ function buildKeyStat(
       )[0];
       return `Weakest: ${weakest[0]} ${weakest[1].score}/6`;
     }
+    case "contrarian":
+      // Placeholder only — real text is the divergence itself ("Otto +X%
+      // vs Street +Y%"), assembled once both forecasts are known, in
+      // runScreener's contrarian-specific finalist branch. This fundamentals
+      // composite is what a wide-pool/semifinalist candidate shows before
+      // that point, or if it never resolves both numbers.
+      return `Composite ${sf.valuation.score + sf.growth.score + sf.quality.score + sf.financialHealth.score + sf.momentum.score}/30 across all axes`;
   }
 }
 
@@ -666,6 +716,8 @@ export async function runScreener(
           // Flagged rather than hidden so a data-starved spike never looks
           // equivalent to a fully-scored pick (the "rocket stock" problem).
           thinCoverage: snap.fundamentalsChecksRun <= 3,
+          sf: snap.sf,
+          valueScore,
         };
       } catch {
         return null; // one bad candidate shouldn't sink the whole screen
@@ -829,6 +881,8 @@ export async function runScreener(
             blendedUpsidePct
           ),
           thinCoverage: fundamentalsChecksRun <= 3,
+          sf,
+          valueScore,
         };
       } else if (analystUpsidePct !== undefined && intent === "momentum") {
         // financialsTrend missing but we still have the target price —
@@ -848,6 +902,11 @@ export async function runScreener(
       // value keyStat already used in that branch, no divergence possible.
       const forecastUpsidePct = blendedUpsidePct ?? analystUpsidePct ?? ottoUpsidePct;
       if (forecastUpsidePct !== undefined) enriched = { ...enriched, forecastUpsidePct };
+      // Kept separate from the blended forecastUpsidePct above — the "Otto
+      // vs Wall Street" contrarian screen needs both real numbers on their
+      // own, not averaged together, to compute how hard they disagree.
+      if (analystUpsidePct !== undefined) enriched = { ...enriched, analystUpsidePct };
+      if (ottoUpsidePct !== undefined) enriched = { ...enriched, ottoUpsidePct };
 
       if (activity) return { ...enriched, insiderActivity: activity };
       // The per-company 90-day check (fetchInsiderActivity, above) can come
@@ -924,6 +983,72 @@ export async function runScreener(
       return key;
     }
 
+    // Mirrors rankKey's math exactly, but as individually labeled line
+    // items instead of one opaque sum — this is the actual "show your
+    // work" data: every real signal that moved the score, with its real
+    // point value, not just a vague "insider activity" badge. Only called
+    // for the final 5 (see buildWhyBreakdown below), never the wide pool.
+    function buildWhyNudges(c: ScreenerCandidate): ScreenerWhyNudge[] {
+      const nudges: ScreenerWhyNudge[] = [];
+      const cluster = clusterNudgeFor(c.symbol);
+      if (cluster !== 0) {
+        nudges.push({ label: cluster > 0 ? "Market-wide insider buying cluster" : "Market-wide insider selling cluster", points: cluster });
+      }
+      if (c.insiderActivity?.direction === "buying") nudges.push({ label: "Insider buying (90d)", points: INSIDER_NUDGE });
+      else if (c.insiderActivity?.direction === "selling") nudges.push({ label: "Insider selling (90d)", points: -INSIDER_NUDGE });
+      const trend = ratingTrendBySymbol.get(c.symbol);
+      if (trend?.direction === "improving") nudges.push({ label: "Analyst ratings improving", points: RATING_TREND_NUDGE });
+      else if (trend?.direction === "worsening") nudges.push({ label: "Analyst ratings worsening", points: -RATING_TREND_NUDGE });
+      const percentile = sectorPercentileBySymbol.get(c.symbol);
+      if (percentile !== undefined) {
+        const points = ((50 - percentile) / 50) * SECTOR_NUDGE_MAX;
+        nudges.push({ label: `Sector valuation (${percentile.toFixed(0)}th percentile vs peers)`, points });
+      }
+      if (c.forecastUpsidePct !== undefined) {
+        const clamped = Math.max(-50, Math.min(50, c.forecastUpsidePct));
+        const points = (clamped / 50) * FORECAST_UPSIDE_NUDGE_MAX;
+        nudges.push({ label: `Forecast upside (${c.forecastUpsidePct >= 0 ? "+" : ""}${c.forecastUpsidePct.toFixed(0)}% to target)`, points });
+      }
+      const earnings = earningsBySymbol.get(c.symbol);
+      if (earnings) {
+        const total = earnings.beatCount + earnings.missCount;
+        if (total > 0) {
+          const points = ((earnings.beatCount - earnings.missCount) / total) * EARNINGS_NUDGE_MAX;
+          nudges.push({ label: `Earnings track record (${earnings.beatCount} beat / ${earnings.missCount} miss)`, points });
+        }
+      }
+      const shortInterest = shortInterestBySymbol.get(c.symbol);
+      if (shortInterest) {
+        let riskFlags = 0;
+        if (shortInterest.daysToCover > 5) riskFlags += 1;
+        if (shortInterest.daysToCover > 10) riskFlags += 1;
+        if (shortInterest.changePercent > 10) riskFlags += 1;
+        if (riskFlags > 0) {
+          const points = -(Math.min(riskFlags, 3) / 3) * SHORT_INTEREST_NUDGE_MAX;
+          nudges.push({ label: `Short interest risk (${shortInterest.daysToCover.toFixed(1)} days to cover)`, points });
+        }
+      }
+      return nudges;
+    }
+
+    /**
+     * Assembles the full audit trail for one finalist — real axis
+     * checks, the continuous value score, and every real-signal nudge with
+     * its actual point value. "contrarian" doesn't apply these nudges at
+     * all (its own ranking is divergence, not rankKey), so it gets an
+     * empty nudge list rather than a misleading one.
+     */
+    function buildWhyBreakdown(c: ScreenerCandidate, finalScore: number): ScreenerWhyBreakdown | undefined {
+      if (!c.sf) return undefined;
+      return {
+        sf: c.sf,
+        valueScore: c.valueScore ?? null,
+        baseScore: Math.round(c.compositeScore),
+        nudges: intent === "contrarian" ? [] : buildWhyNudges(c),
+        finalScore: Math.round(finalScore),
+      };
+    }
+
     // Phase C: raise the bar for what "makes the list" at all, as real
     // filters applied before selection — not just nudges that reshuffle
     // order, and not just a reconciliation note explaining a gap after the
@@ -994,30 +1119,68 @@ export async function runScreener(
       return selected;
     }
 
-    const rankedFinalists = [...withInsider, ...rest]
-      .filter((c) => meetsBar(c, rankKey(c)))
-      .sort((a, b) => {
-        if (a.thinCoverage !== b.thinCoverage) return a.thinCoverage ? 1 : -1;
-        return ascending ? rankKey(a) - rankKey(b) : rankKey(b) - rankKey(a);
+    let finalists: ScreenerCandidate[];
+    if (intent === "contrarian") {
+      // "Otto vs. Wall Street" asks a fundamentally different question
+      // than the other five intents: not "what's fundamentally good" but
+      // "where do two independent, real forecasts disagree hardest."
+      // Both numbers (analystUpsidePct, ottoUpsidePct) only exist for
+      // semifinalists that reached full Stage 3 enrichment — the wide pool
+      // can't be ranked by divergence at all, which is why this intent is
+      // sourced/narrowed the same balanced "best"-style way and only
+      // re-ranked by real divergence here, the one point both numbers are
+      // actually known. thinCoverage candidates are excluded outright —
+      // a "disagreement" on a data-starved read isn't a real signal.
+      const MIN_DIVERGENCE = 20;
+      const withDivergence = withInsider
+        .filter((c) => c.analystUpsidePct !== undefined && c.ottoUpsidePct !== undefined && !c.thinCoverage)
+        .map((c) => ({ c, divergence: c.ottoUpsidePct! - c.analystUpsidePct! }))
+        .filter((x) => Math.abs(x.divergence) >= MIN_DIVERGENCE)
+        .sort((a, b) => Math.abs(b.divergence) - Math.abs(a.divergence));
+      const divergenceBySymbol = new Map(withDivergence.map((x) => [x.c.symbol, x.divergence]));
+      const diversified = selectDiversified(
+        withDivergence.map((x) => x.c),
+        5
+      );
+      finalists = diversified.map((c) => {
+        const divergence = divergenceBySymbol.get(c.symbol)!;
+        const direction = divergence > 0 ? "more bullish than" : "more bearish than";
+        const whyBreakdown = buildWhyBreakdown(c, c.compositeScore);
+        const { sf: _sf, valueScore: _valueScore, ...rest } = c;
+        return {
+          ...rest,
+          keyStat: `Otto ${c.ottoUpsidePct! >= 0 ? "+" : ""}${c.ottoUpsidePct!.toFixed(0)}% vs Street ${c.analystUpsidePct! >= 0 ? "+" : ""}${c.analystUpsidePct!.toFixed(0)}% (${Math.abs(divergence).toFixed(0)}pt gap, Otto ${direction} Wall Street)`,
+          whyBreakdown,
+        };
       });
-    // "avoid" isn't a picks list — if a sector genuinely has the most red
-    // flags, showing more than 2 from it is the honest answer, not a flaw
-    // to correct for.
-    const selectedFinalists = intent === "avoid" ? rankedFinalists.slice(0, 5) : selectDiversified(rankedFinalists, 5);
-    // The displayed score must reflect the same real signals used to rank —
-    // otherwise a stock can visibly carry an "insiders selling" flag while
-    // still showing a 100/100 screen score, which reads as a contradiction
-    // (confirmed live: AYI/UBER/INCY all displayed 100 despite an insider-
-    // selling badge, because the nudges only ever affected sort order, never
-    // the number shown next to them). rankKey already folds in every real
-    // signal (insider activity, rating trend, sector valuation, forecast
-    // upside, earnings consistency, short interest) on top of the raw
-    // Snowflake composite — so it becomes the displayed score too, clamped
-    // back to the 0-100 scale the UI expects.
-    const finalists = selectedFinalists.map((c) => ({
-      ...c,
-      compositeScore: Math.max(0, Math.min(100, Math.round(rankKey(c)))),
-    }));
+    } else {
+      const rankedFinalists = [...withInsider, ...rest]
+        .filter((c) => meetsBar(c, rankKey(c)))
+        .sort((a, b) => {
+          if (a.thinCoverage !== b.thinCoverage) return a.thinCoverage ? 1 : -1;
+          return ascending ? rankKey(a) - rankKey(b) : rankKey(b) - rankKey(a);
+        });
+      // "avoid" isn't a picks list — if a sector genuinely has the most red
+      // flags, showing more than 2 from it is the honest answer, not a flaw
+      // to correct for.
+      const selectedFinalists = intent === "avoid" ? rankedFinalists.slice(0, 5) : selectDiversified(rankedFinalists, 5);
+      // The displayed score must reflect the same real signals used to rank —
+      // otherwise a stock can visibly carry an "insiders selling" flag while
+      // still showing a 100/100 screen score, which reads as a contradiction
+      // (confirmed live: AYI/UBER/INCY all displayed 100 despite an insider-
+      // selling badge, because the nudges only ever affected sort order, never
+      // the number shown next to them). rankKey already folds in every real
+      // signal (insider activity, rating trend, sector valuation, forecast
+      // upside, earnings consistency, short interest) on top of the raw
+      // Snowflake composite — so it becomes the displayed score too, clamped
+      // back to the 0-100 scale the UI expects.
+      finalists = selectedFinalists.map((c) => {
+        const finalScore = Math.max(0, Math.min(100, Math.round(rankKey(c))));
+        const whyBreakdown = buildWhyBreakdown(c, finalScore);
+        const { sf: _sf, valueScore: _valueScore, ...rest } = c;
+        return { ...rest, compositeScore: finalScore, whyBreakdown };
+      });
+    }
 
     // Permanent track-record log — deliberately placed here, inside the
     // cached getOrSet callback, not in the API route that calls

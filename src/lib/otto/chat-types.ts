@@ -9,6 +9,7 @@ import type {
 } from "./schema";
 import type { PeerValuation } from "./peers";
 import type { InsiderActivity } from "./insider";
+import type { ScreenerWhyBreakdown } from "./screener";
 
 /** A small, targeted visual answering one follow-up question about a stock
  * already discussed — deliberately smaller than the full OttoCardCompact,
@@ -41,6 +42,10 @@ export interface ScreenerResultItem {
   thinCoverage?: boolean; // true when ranked without real fundamentals data (e.g. a momentum spike with no ratios/metrics)
   insiderActivity?: { buys: number; sells: number; netShares: number; direction: "buying" | "selling" | "mixed" };
   filingNote?: string; // real excerpt from the company's own 10-K
+  forecastUpsidePct?: number;
+  analystUpsidePct?: number; // real analyst-consensus upside alone — "Otto vs Wall Street" screen
+  ottoUpsidePct?: number; // Otto's own forecast upside alone — same
+  whyBreakdown?: ScreenerWhyBreakdown; // full audit trail behind the score — show-your-work feature
 }
 
 export interface ScreenerResults {

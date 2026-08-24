@@ -2,8 +2,70 @@
 
 import { useState } from "react";
 import { clsx } from "clsx";
-import type { ScreenerResults } from "@/lib/otto/chat-types";
+import type { ScreenerResults, ScreenerResultItem } from "@/lib/otto/chat-types";
 import { Disclaimer } from "./Disclaimer";
+
+const AXIS_LABELS: Record<string, string> = {
+  valuation: "Valuation",
+  growth: "Growth",
+  quality: "Quality",
+  financialHealth: "Financial health",
+  momentum: "Momentum",
+};
+
+/**
+ * The full audit trail behind one pick — every real check, the continuous
+ * value score, and every real-signal nudge with its actual point value.
+ * "Show your work" as a feature, not a footnote: nobody else offers this
+ * level of granularity for free, and it's real data Otto already computed,
+ * not a new claim invented for display.
+ */
+function WhyPanel({ breakdown }: { breakdown: NonNullable<ScreenerResultItem["whyBreakdown"]> }) {
+  return (
+    <div className="mt-2 rounded-xl border border-otto-border-soft bg-white/[0.02] p-3 text-xs">
+      <div className="mb-2 grid grid-cols-5 gap-1.5">
+        {(Object.keys(AXIS_LABELS) as (keyof typeof AXIS_LABELS)[]).map((axis) => {
+          const axisScore = breakdown.sf[axis as keyof typeof breakdown.sf];
+          return (
+            <div key={axis} className="rounded-lg bg-white/[0.03] px-1.5 py-1.5 text-center">
+              <div className="otto-text-caption text-[9px] uppercase tracking-wide text-otto-text-faint">
+                {AXIS_LABELS[axis]}
+              </div>
+              <div className="tabular-nums text-sm font-semibold text-otto-text">{axisScore.score}/6</div>
+            </div>
+          );
+        })}
+      </div>
+      {breakdown.valueScore !== null && (
+        <div className="mb-2 flex items-center justify-between text-otto-text-muted">
+          <span>Continuous value score (how cheap, really)</span>
+          <span className="tabular-nums font-medium text-otto-text">{breakdown.valueScore}/100</span>
+        </div>
+      )}
+      <div className="mb-2 flex items-center justify-between text-otto-text-muted">
+        <span>Base score (axes {breakdown.valueScore !== null ? "+ value score" : ""})</span>
+        <span className="tabular-nums font-medium text-otto-text">{breakdown.baseScore}</span>
+      </div>
+      {breakdown.nudges.length > 0 && (
+        <div className="mb-2 flex flex-col gap-1 border-t border-otto-border-soft pt-2">
+          {breakdown.nudges.map((n, i) => (
+            <div key={i} className="flex items-center justify-between gap-2 text-otto-text-muted">
+              <span className="truncate">{n.label}</span>
+              <span className={clsx("shrink-0 tabular-nums font-medium", n.points >= 0 ? "text-otto-bull" : "text-otto-bear")}>
+                {n.points >= 0 ? "+" : ""}
+                {n.points.toFixed(1)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center justify-between border-t border-otto-border-soft pt-2 font-medium text-otto-text">
+        <span>Final score</span>
+        <span className="tabular-nums">{breakdown.finalScore}</span>
+      </div>
+    </div>
+  );
+}
 
 function scoreColor(score: number, isAvoidList: boolean) {
   // On the avoid list every entry is flagged as weak — the "least bad" one
@@ -95,6 +157,7 @@ export function ScreenerResultsCard({
 }) {
   const VIEWS = ["list", "grid"] as const;
   const [view, setView] = useState<"list" | "grid">("list");
+  const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
 
   return (
     <div className="otto-material otto-elevation-resting w-full max-w-md rounded-2xl border p-5">
@@ -125,12 +188,11 @@ export function ScreenerResultsCard({
       ) : (
       <div className="divide-y divide-otto-border-soft">
         {screener.results.map((r, i) => (
-          <button
-            key={r.symbol}
-            onClick={() => onSelect(r.symbol)}
-            style={{ animationDelay: `${i * 60}ms` }}
-            className="otto-arrive flex w-full flex-col gap-1.5 py-2.5 text-left transition-colors hover:bg-white/[0.03]"
-          >
+          <div key={r.symbol} style={{ animationDelay: `${i * 60}ms` }} className="otto-arrive flex flex-col gap-1.5 py-2.5">
+            <button
+              onClick={() => onSelect(r.symbol)}
+              className="flex w-full flex-col gap-1.5 text-left transition-colors hover:bg-white/[0.03]"
+            >
             <div className="flex w-full items-center gap-3">
               <span className="w-4 shrink-0 text-xs text-otto-text-faint">{r.rank}</span>
               <div className="min-w-0 flex-1">
@@ -183,7 +245,19 @@ export function ScreenerResultsCard({
                 From the 10-K: &ldquo;{r.filingNote}&rdquo;
               </p>
             )}
-          </button>
+            </button>
+            {r.whyBreakdown && (
+              <>
+                <button
+                  onClick={() => setExpandedSymbol(expandedSymbol === r.symbol ? null : r.symbol)}
+                  className="self-start pl-7 text-[10px] font-medium uppercase tracking-wide text-otto-gold transition-opacity hover:opacity-75"
+                >
+                  {expandedSymbol === r.symbol ? "Hide why ▲" : "Why this score? ▼"}
+                </button>
+                {expandedSymbol === r.symbol && <WhyPanel breakdown={r.whyBreakdown} />}
+              </>
+            )}
+          </div>
         ))}
       </div>
       )}

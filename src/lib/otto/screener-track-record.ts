@@ -79,8 +79,16 @@ export async function logScreenerCall(params: {
   // avoid call inverts that (success = the stock underperforming). Keeping
   // it out of the permanent log avoids mixing two different claims under
   // one "track record" umbrella, especially while avoid's calibration is
-  // the newest and least-proven of the five intents (see Phase 0).
-  if (params.intent === "avoid") return;
+  // the newest and least-proven of the intents (see Phase 0).
+  //
+  // "contrarian" is excluded for a different reason: unlike every other
+  // intent, its "success" direction varies PER PICK (Otto more bullish
+  // than the Street on one stock, more bearish on another) — the current
+  // alpha model (INVERTED_INTENTS below) only supports one fixed direction
+  // per intent. Logging these correctly would need storing each pick's
+  // disagreement direction individually, not just its intent — real scope
+  // beyond building the screen itself, not done here.
+  if (params.intent === "avoid" || params.intent === "contrarian") return;
   try {
     const onCooldown = await redis.get(cooldownKey(params.intent, params.symbol));
     if (onCooldown) return;
