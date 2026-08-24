@@ -157,8 +157,8 @@ function mulberry32(seed: number) {
 }
 const POOL_SEED = 20260101;
 
-function seededShuffle<T>(arr: T[]): T[] {
-  const random = mulberry32(POOL_SEED);
+function seededShuffle<T>(arr: T[], seedOffset = 0): T[] {
+  const random = mulberry32(POOL_SEED + seedOffset);
   const copy = [...arr];
   for (let i = copy.length - 1; i > 0; i--) {
     const j = Math.floor(random() * (i + 1));
@@ -175,13 +175,37 @@ const LEVERAGED_OR_FUND_NAME = /\b(2X|3X|Bull|Bear|Daily|Leveraged|Inverse|ETF|T
  * names are always in the scoring pool, then fills the rest with a
  * deterministically-seeded sample of the remainder for "hidden gem"
  * diversity — reproducible run to run, unlike a fresh Math.random() draw.
+ *
+ * anchorSize and seedOffset are intent-tunable (see POOL_CONFIG) so
+ * different intents draw genuinely different candidate pools from the same
+ * universe, instead of every generic (no theme/cap) screen re-ranking the
+ * identical 450-name list — confirmed live pre-fix: "undervalued" and
+ * "best" scored the exact same byte-for-byte pool, so any surface-level
+ * overlap in their results couldn't be distinguished from "the weighting
+ * just happens to agree" vs "there was never a different stock to find."
  */
-function buildCandidatePool(companies: UniverseEntry[], size: number): UniverseEntry[] {
-  const anchor = companies.slice(0, Math.min(50, companies.length));
+function buildCandidatePool(companies: UniverseEntry[], size: number, anchorSize = 50, seedOffset = 0): UniverseEntry[] {
+  const anchor = companies.slice(0, Math.min(anchorSize, companies.length));
   const rest = companies.slice(anchor.length);
-  const extra = seededShuffle(rest).slice(0, Math.max(size - anchor.length, 0));
+  const extra = seededShuffle(rest, seedOffset).slice(0, Math.max(size - anchor.length, 0));
   return [...anchor, ...extra];
 }
+
+// Per-intent pool shape for the generic (no theme/cap) sourcing path.
+// "undervalued" specifically shrinks the mega-cap anchor — real bargains
+// skew mid/small-cap far more than the top-50-by-prominence slice a generic
+// screen anchors on, so a smaller anchor + more of the wide remainder gives
+// "undervalued" an actual shot at surfacing names "best" would never draw.
+// "best"/"quality"/"avoid" keep the full mega-cap anchor (a "best pick"
+// question reasonably favors well-known, liquid names) but each gets its
+// own seed offset so their non-anchor remainder samples don't coincide.
+const POOL_CONFIG: Record<ScreenIntent, { anchorSize: number; seedOffset: number }> = {
+  undervalued: { anchorSize: 15, seedOffset: 7919 },
+  momentum: { anchorSize: 50, seedOffset: 0 }, // unused — momentum sources from gainers/actives, not this pool
+  best: { anchorSize: 50, seedOffset: 0 },
+  quality: { anchorSize: 50, seedOffset: 15485863 },
+  avoid: { anchorSize: 50, seedOffset: 32452843 },
+};
 
 // Bounded concurrency for the wide Stage 1 scan — Finnhub's free tier caps
 // each key at 60 req/min, so firing hundreds of candidates via a single
@@ -276,7 +300,10 @@ async function sourceCandidates(
   // companies) must NOT also fall through to the full unfiltered market —
   // that would dilute a focused custom screen with random unrelated names
   // that just happened to score well on generic fundamentals.
-  if (!theme && !capFilter) return seedTickers.length > 0 ? unionSeeds([]) : unionSeeds(buildCandidatePool(companies, 450));
+  if (!theme && !capFilter) {
+    const { anchorSize, seedOffset } = POOL_CONFIG[intent];
+    return seedTickers.length > 0 ? unionSeeds([]) : unionSeeds(buildCandidatePool(companies, 450, anchorSize, seedOffset));
+  }
 
   // Theme/cap screens need a much wider initial sample since most
   // candidates get filtered out (a 40-ticker sample only turned up 1 AI
