@@ -201,8 +201,14 @@ const AXIS_LABELS: Record<keyof OttoSnowflakeScores, string> = {
 // Below this point-difference, the existing generic disclaimer ("Screen
 // score is a quick ranking... won't always match") already covers it — not
 // every gap is worth a specific explanation, only the ones large enough to
-// look like a contradiction to a user.
-const RECONCILIATION_THRESHOLD = 15;
+// look like a contradiction to a user. Lowered from 15 to 10 — confirmed
+// live on ALL: a real, meaningful gap (screener showed 100 in "undervalued"
+// vs conviction 85, a 15pt gap from what the user actually saw) went
+// unexplained because this check compares against getCachedScreenerSnapshot's
+// neutral "best"-weighted baseline (97 for ALL), not the specific intent
+// score the user actually looked at — the two can differ enough that a real
+// gap sits right at the old threshold without tripping it.
+const RECONCILIATION_THRESHOLD = 10;
 
 /**
  * Deterministic, grounded in the same real numbers used to rank the stock

@@ -764,6 +764,15 @@ export async function runScreener(
 
       let enriched = candidate;
       let ottoUpsidePct: number | undefined;
+      // Set only when the branch below runs (real financials available) —
+      // computed before keyStat is built so the displayed "+X% to target"
+      // text and the real forecastUpsidePct used for scoring/ranking/the
+      // Phase C upside floor are always the same number. Building keyStat
+      // from the pre-blend analystUpsidePct alone (the original bug) meant
+      // a user could see e.g. "+8% to target" in the card while the real,
+      // blended number that actually earned the stock its spot on the
+      // list was well over 20% — confirmed live on ALL in "undervalued".
+      let blendedUpsidePct: number | undefined;
       if (financialsTrend && fundamentals) {
         const enrichedBundle: StockBundle = {
           symbol: candidate.symbol,
@@ -798,6 +807,15 @@ export async function runScreener(
         if (candidate.price > 0) {
           ottoUpsidePct = ((ottoForecast.baseTarget - candidate.price) / candidate.price) * 100;
         }
+        // Blend Street's analyst-target upside with Otto's own conservative
+        // model when both are available — real forward return isn't just
+        // one number, and averaging the two is more honest than picking
+        // either alone. Computed here, before keyStat, so both use the
+        // identical number (see the comment above ottoUpsidePct).
+        blendedUpsidePct =
+          analystUpsidePct !== undefined && ottoUpsidePct !== undefined
+            ? (analystUpsidePct + ottoUpsidePct) / 2
+            : (analystUpsidePct ?? ottoUpsidePct);
         const valueScore = computeValueScore(fundamentals.ratios, fundamentals.keyMetrics);
         const fundamentalsChecksRun =
           sf.valuation.checks.length + sf.growth.checks.length + sf.quality.checks.length + sf.financialHealth.checks.length;
@@ -808,7 +826,7 @@ export async function runScreener(
             intent,
             { ratios: fundamentals.ratios, keyMetrics: fundamentals.keyMetrics, changePercentage: enrichedBundle.quote.changePercentage },
             sf,
-            analystUpsidePct
+            blendedUpsidePct
           ),
           thinCoverage: fundamentalsChecksRun <= 3,
         };
@@ -824,16 +842,11 @@ export async function runScreener(
           keyStat: `${analystUpsidePct >= 0 ? "+" : ""}${analystUpsidePct.toFixed(0)}% to analyst target · Momentum ${momentumScore}`,
         };
       }
-      // Blend Street's analyst-target upside with Otto's own conservative
-      // model when both are available — real forward return isn't just one
-      // number, and averaging the two is more honest than picking either
-      // alone. Whichever one is actually available (financialsTrend can
-      // fail independently of the Yahoo price-target call) still counts on
-      // its own rather than dropping the whole signal.
-      const forecastUpsidePct =
-        analystUpsidePct !== undefined && ottoUpsidePct !== undefined
-          ? (analystUpsidePct + ottoUpsidePct) / 2
-          : (analystUpsidePct ?? ottoUpsidePct);
+      // blendedUpsidePct is only set when the financialsTrend branch ran;
+      // otherwise (the momentum-only branch, or neither) there's no Otto
+      // forecast to blend with, so the analyst number stands alone — same
+      // value keyStat already used in that branch, no divergence possible.
+      const forecastUpsidePct = blendedUpsidePct ?? analystUpsidePct ?? ottoUpsidePct;
       if (forecastUpsidePct !== undefined) enriched = { ...enriched, forecastUpsidePct };
 
       if (activity) return { ...enriched, insiderActivity: activity };

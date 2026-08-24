@@ -74,6 +74,13 @@ export async function logScreenerCall(params: {
   price: number;
   compositeScore: number;
 }): Promise<void> {
+  // "avoid" isn't a recommendation to buy — a track record is fundamentally
+  // about "here's what we told people to consider, did it work out," and an
+  // avoid call inverts that (success = the stock underperforming). Keeping
+  // it out of the permanent log avoids mixing two different claims under
+  // one "track record" umbrella, especially while avoid's calibration is
+  // the newest and least-proven of the five intents (see Phase 0).
+  if (params.intent === "avoid") return;
   try {
     const onCooldown = await redis.get(cooldownKey(params.intent, params.symbol));
     if (onCooldown) return;
