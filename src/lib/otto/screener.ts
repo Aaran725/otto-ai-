@@ -434,6 +434,32 @@ function scoreCandidate(intent: ScreenIntent, sf: OttoSnowflakeScores, weights: 
   return Math.round((weightedSum / weightTotal) * 100);
 }
 
+/**
+ * Passive cross-reference for the screener-vs-conviction divergence check
+ * (see route.ts) — reads the existing per-symbol snapshot cache directly
+ * (synchronous, no fetch) and returns null when nothing is cached, rather
+ * than ever triggering a new lookup just to log a metric. Uses "best"
+ * weights as a neutral, intent-agnostic baseline since the caller doesn't
+ * know what screen (if any) last touched this symbol.
+ */
+export function getCachedScreenerScore(symbol: string): number | null {
+  // Must match getSymbolSnapshot's cache key exactly (raw symbol, no case
+  // normalization) — screener candidates are always already-uppercase from
+  // their sources, so this is consistent in practice.
+  const snap = getSymbolScoreCache<SymbolSnapshot | null>().get(symbol);
+  if (!snap) return null;
+  return scoreCandidate("best", snap.sf);
+}
+
+/** Same lookup as getCachedScreenerScore but also returns the per-axis
+ * Snowflake scores, so a caller can explain *which* axis diverged, not
+ * just that the composite score did. */
+export function getCachedScreenerSnapshot(symbol: string): { compositeScore: number; sf: OttoSnowflakeScores } | null {
+  const snap = getSymbolScoreCache<SymbolSnapshot | null>().get(symbol);
+  if (!snap) return null;
+  return { compositeScore: scoreCandidate("best", snap.sf), sf: snap.sf };
+}
+
 function buildKeyStat(
   intent: ScreenIntent,
   data: { ratios: FmpRatios | null; keyMetrics: FmpKeyMetrics | null; changePercentage: number },

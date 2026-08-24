@@ -345,7 +345,7 @@ async function buildFallbackProfile(symbol: string): Promise<FmpProfile | null> 
 }
 
 async function buildStockBundle(symbol: string): Promise<StockBundle> {
-  const [profile, quoteExtras, ratios, keyMetrics, priceTargetConsensus, gradesConsensus, historical, income, cashFlow] =
+  const [profile, quoteExtras, ratios, keyMetrics, priceTargetConsensus, gradesConsensus, historical, income, cashFlow, finnhubFundamentals] =
       await Promise.all([
         fmpGetOptional<FmpProfile[]>("/profile", { symbol }, []),
         fmpGetOptional<FmpQuote[]>("/quote", { symbol }, []),
@@ -356,6 +356,12 @@ async function buildStockBundle(symbol: string): Promise<StockBundle> {
         fmpGetOptional<FmpHistoricalPricePoint[]>("/historical-price-eod/light", { symbol }, []),
         fmpGetOptional<FmpIncomeStatement[]>("/income-statement", { symbol, limit: "5" }, []),
         fmpGetOptional<FmpCashFlowStatementRaw[]>("/cash-flow-statement", { symbol, limit: "5" }, []),
+        // Always fetched (not just as a last-resort fallback) — cheap, cached
+        // at the source across the whole app — so the single-stock path can
+        // backfill the same real 13/26-week momentum fields the screener
+        // uses, and comparably score momentum regardless of whether FMP
+        // itself succeeded. See the merge logic below.
+        fetchFinnhubFundamentals(symbol),
       ]);
 
     let p: FmpProfile | undefined = profile?.[0];
@@ -374,6 +380,34 @@ async function buildStockBundle(symbol: string): Promise<StockBundle> {
     }
     const q = quoteExtras?.[0];
 
+    let resolvedRatios = ratios?.[0] ?? null;
+    let resolvedKeyMetrics = keyMetrics?.[0] ?? null;
+
+    // FMP's /ratios, /key-metrics, and /quote have no equivalent of
+    // Finnhub's real 13/26-week trailing return + S&P-relative-strength
+    // fields (see snowflake.ts's momentum checks) — without this, the
+    // single-stock path scores momentum off FMP's daily 50/200-day SMAs
+    // while the screener scores it off Finnhub's weekly returns, so the
+    // same stock's momentum axis is judged on a genuinely different
+    // criteria set depending on which page you're looking at. finnhubFundamentals
+    // (fetched above, always, not just as a last-resort fallback) backfills
+    // those specific fields as a supplement — it never overwrites real FMP data.
+
+    // FMP blocks /ratios and /key-metrics entirely for some large, liquid
+    // tickers (confirmed: CRWD, RDDT, TEM) — fall back to Finnhub's free
+    // metric endpoint rather than leaving Otto with zero fundamentals.
+    if (!resolvedRatios && !resolvedKeyMetrics && finnhubFundamentals) {
+      resolvedRatios = finnhubFundamentals.ratios;
+      resolvedKeyMetrics = finnhubFundamentals.keyMetrics;
+    } else if (resolvedKeyMetrics && finnhubFundamentals) {
+      resolvedKeyMetrics = {
+        ...resolvedKeyMetrics,
+        thirteenWeekReturn: resolvedKeyMetrics.thirteenWeekReturn ?? finnhubFundamentals.keyMetrics.thirteenWeekReturn,
+        twentySixWeekReturn: resolvedKeyMetrics.twentySixWeekReturn ?? finnhubFundamentals.keyMetrics.twentySixWeekReturn,
+        relativeStrength13Week: resolvedKeyMetrics.relativeStrength13Week ?? finnhubFundamentals.keyMetrics.relativeStrength13Week,
+      };
+    }
+
     const quote: PriceSnapshot = {
       symbol,
       name: p.companyName,
@@ -381,25 +415,11 @@ async function buildStockBundle(symbol: string): Promise<StockBundle> {
       changePercentage: p.changePercentage,
       marketCap: p.marketCap,
       currency: p.currency,
-      yearHigh: q?.yearHigh,
-      yearLow: q?.yearLow,
+      yearHigh: q?.yearHigh ?? finnhubFundamentals?.week52High,
+      yearLow: q?.yearLow ?? finnhubFundamentals?.week52Low,
       priceAvg50: q?.priceAvg50,
       priceAvg200: q?.priceAvg200,
     };
-
-    let resolvedRatios = ratios?.[0] ?? null;
-    let resolvedKeyMetrics = keyMetrics?.[0] ?? null;
-
-    // FMP blocks /ratios and /key-metrics entirely for some large, liquid
-    // tickers (confirmed: CRWD, RDDT, TEM) — fall back to Finnhub's free
-    // metric endpoint rather than leaving Otto with zero fundamentals.
-    if (!resolvedRatios && !resolvedKeyMetrics) {
-      const fallback = await fetchFinnhubFundamentals(symbol);
-      if (fallback) {
-        resolvedRatios = fallback.ratios;
-        resolvedKeyMetrics = fallback.keyMetrics;
-      }
-    }
 
     let resolvedIncome = (income ?? []).slice().reverse();
     let resolvedCashFlow: FmpCashFlowStatement[] = (cashFlow ?? [])

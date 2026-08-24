@@ -145,4 +145,9 @@ export interface OttoAnalysis {
   insiderActivity: InsiderActivity | null;
   generatedAt: string; // ISO timestamp
   dataQuality: DataQuality;
+  /** Explains a real screener-vs-conviction divergence when one exists,
+   * grounded in the actual axis-by-axis numbers — null when there's no
+   * cached screener result to compare against, or when the two scores
+   * agree closely enough that the generic disclaimer already covers it. */
+  reconciliationNote: string | null;
 }

@@ -120,6 +120,12 @@ export function ExpandedResearchSheet({
               <ConvictionGauge score={analysis.convictionScore} dataQuality={analysis.dataQuality} />
             </div>
             <p className="otto-text-body text-otto-text-muted">{analysis.synthesis}</p>
+            {analysis.reconciliationNote && (
+              <div className="rounded-lg border border-otto-gold/25 bg-otto-gold-soft px-4 py-3 text-xs text-otto-text-muted">
+                <span className="font-medium text-otto-gold">Score changed from the screen. </span>
+                {analysis.reconciliationNote}
+              </div>
+            )}
             {analysis.positionSizing && analysis.dataQuality !== "insufficient" && (
               <div className="rounded-lg border border-otto-border-soft bg-black/20 px-4 py-3 text-xs text-otto-text-muted">
                 <span className="font-medium text-otto-text">Suggested size: {analysis.positionSizing.suggestedPct}% of book.</span>{" "}

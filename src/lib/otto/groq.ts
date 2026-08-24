@@ -1,6 +1,7 @@
 import Groq from "groq-sdk";
 import { OTTO_SYSTEM_PROMPT, buildOttoUserPrompt } from "./system-prompt";
 import type { GroqOttoResponse, OttoAnalysis, OttoSnowflake, StreetConsensus, DataQuality } from "./schema";
+import { getCachedScreenerSnapshot } from "./screener";
 import { getAnalysisCache } from "./cache";
 import { computeSnowflake, type OttoSnowflakeScores } from "./snowflake";
 import { computeForecastTargets } from "./forecast";
@@ -188,6 +189,56 @@ export async function runOttoAnalysis(
   return analysis;
 }
 
+const AXIS_LABELS: Record<keyof OttoSnowflakeScores, string> = {
+  valuation: "valuation",
+  growth: "growth",
+  quality: "quality",
+  financialHealth: "financial health",
+  momentum: "momentum",
+};
+
+// Below this point-difference, the existing generic disclaimer ("Screen
+// score is a quick ranking... won't always match") already covers it — not
+// every gap is worth a specific explanation, only the ones large enough to
+// look like a contradiction to a user.
+const RECONCILIATION_THRESHOLD = 15;
+
+/**
+ * Deterministic, grounded in the same real numbers used to rank the stock
+ * in the screener — never LLM-generated, so it can't invent a reason that
+ * didn't actually drive the score. Only fires when there's a cached
+ * screener result for this exact symbol to compare against (see
+ * getCachedScreenerSnapshot) and the gap is large enough to need
+ * explaining, not just labeling.
+ */
+function buildReconciliationNote(ticker: string, convictionScore: number, analysisSf: OttoSnowflakeScores): string | null {
+  const screenerSnap = getCachedScreenerSnapshot(ticker);
+  if (!screenerSnap) return null;
+
+  const rounded = Math.round(convictionScore);
+  const delta = rounded - screenerSnap.compositeScore;
+  if (Math.abs(delta) < RECONCILIATION_THRESHOLD) return null;
+
+  let biggestAxis: keyof OttoSnowflakeScores | null = null;
+  let biggestAxisDelta = 0;
+  for (const axis of Object.keys(AXIS_LABELS) as (keyof OttoSnowflakeScores)[]) {
+    const axisDelta = analysisSf[axis].score - screenerSnap.sf[axis].score;
+    if (Math.abs(axisDelta) > Math.abs(biggestAxisDelta)) {
+      biggestAxisDelta = axisDelta;
+      biggestAxis = axis;
+    }
+  }
+
+  const direction = delta > 0 ? "up" : "down";
+  if (biggestAxis && Math.abs(biggestAxisDelta) >= 2) {
+    const label = AXIS_LABELS[biggestAxis];
+    const from = screenerSnap.sf[biggestAxis].score;
+    const to = analysisSf[biggestAxis].score;
+    return `Screened at ${screenerSnap.compositeScore}, but the full analysis moved ${direction} to ${rounded} — mainly driven by ${label} (${from}/6 on the quick scan vs ${to}/6 with real financials).`;
+  }
+  return `Screened at ${screenerSnap.compositeScore} using a quicker, thinner scan — the full analysis (real financials, forecast, peer comparison) landed at ${rounded} instead.`;
+}
+
 async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress?: ProgressFn): Promise<OttoAnalysis> {
     onProgress?.({ id: "snowflake", text: "Computing Snowflake & forecast…", icon: "otto", tracksFinding: true });
     const snowflakeScores = computeSnowflake(bundle);
@@ -370,10 +421,25 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       dataQuality === "insufficient"
         ? `Not enough real financial data available for ${ticker} right now — treat any score as unreliable and verify independently.`
         : base.oneLiner;
+    const reconciliationNote = buildReconciliationNote(ticker, base.convictionScore, snowflakeScores);
+
+    // Phase 1 item 3: passive server-side signal for how often the two
+    // pipelines actually disagree by a lot — no analytics service wired up
+    // yet, so this is a plain server log for now. If this fires rarely,
+    // the existing disclaimer is sufficient; if it's common, the screener
+    // and single-stock scoring need to converge, not just be labeled
+    // differently.
+    const cachedScreenerScore = getCachedScreenerSnapshot(ticker)?.compositeScore;
+    if (cachedScreenerScore !== undefined && Math.abs(Math.round(base.convictionScore) - cachedScreenerScore) > 25) {
+      console.warn(
+        `[score-divergence] ${ticker}: screen=${cachedScreenerScore} conviction=${Math.round(base.convictionScore)}`
+      );
+    }
 
     return {
       ...base,
       oneLiner,
+      reconciliationNote,
       dataQuality,
       historicalPrices: bundle.historicalMonthly.map((p) => ({ date: p.date, close: p.price })),
       fundamentalTrend: bundle.income.map((inc, i) => ({
