@@ -128,6 +128,59 @@ function nearestPrice(history: PricePoint[], targetDate: string): number | null 
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
+/** Shared direction logic between the permanent milestone evaluator and the
+ * live on-demand viewer below — see INVERTED_INTENTS for why "avoid"
+ * flips the comparison. */
+function computeAlpha(intent: ScreenIntent, stockReturnPct: number, spyReturnPct: number): number {
+  return INVERTED_INTENTS.has(intent) ? spyReturnPct - stockReturnPct : stockReturnPct - spyReturnPct;
+}
+
+export interface ScreenerCallWithLive extends ScreenerCallRecord {
+  live: {
+    price: number;
+    stockReturnPct: number;
+    spyReturnPct: number;
+    alphaPct: number;
+  } | null; // null when a live quote couldn't be fetched
+}
+
+/**
+ * On-demand mark-to-market for every logged call, computed fresh on each
+ * request and never written to Redis — the permanent record only ever gets
+ * written by evaluateDueScreenerCalls() at real 30/90/180-day milestones.
+ * This exists purely so a human can ask "what's this worth right now"
+ * without waiting for a milestone to land; it's not part of the official
+ * track record math.
+ */
+export async function getScreenerCallsWithLiveMarks(): Promise<ScreenerCallWithLive[]> {
+  const calls = await getAllScreenerCalls();
+  if (calls.length === 0) return [];
+
+  const [spyHistoryAlpaca, spyQuote] = await Promise.all([
+    fetchAlpacaHistoricalMonthly("SPY").catch(() => []),
+    fetchFinnhubQuote("SPY").catch(() => null),
+  ]);
+  const spyHistory = spyHistoryAlpaca.length > 0 ? spyHistoryAlpaca : await fetchYahooHistoricalMonthly("SPY").catch(() => []);
+  const spyCurrent = spyQuote?.price ?? null;
+
+  return Promise.all(
+    calls.map(async (call): Promise<ScreenerCallWithLive> => {
+      const quote = await fetchFinnhubQuote(call.symbol).catch(() => null);
+      const currentPrice = quote?.price ?? null;
+      const spyAtCall = nearestPrice(spyHistory, call.calledAt);
+      if (currentPrice === null || spyAtCall === null || spyCurrent === null) {
+        return { ...call, live: null };
+      }
+      const stockReturnPct = ((currentPrice - call.priceAtCall) / call.priceAtCall) * 100;
+      const spyReturnPct = ((spyCurrent - spyAtCall) / spyAtCall) * 100;
+      return {
+        ...call,
+        live: { price: currentPrice, stockReturnPct, spyReturnPct, alphaPct: computeAlpha(call.intent, stockReturnPct, spyReturnPct) },
+      };
+    })
+  );
+}
+
 /**
  * Sweeps every logged call for milestones (30/90/180 days) that have been
  * crossed but not yet evaluated, computes real realized alpha vs SPY, and
@@ -167,7 +220,7 @@ export async function evaluateDueScreenerCalls(): Promise<{ evaluated: number; c
 
       const stockReturnPct = ((currentPrice - call.priceAtCall) / call.priceAtCall) * 100;
       const spyReturnPct = ((spyCurrent - spyAtCall) / spyAtCall) * 100;
-      const alphaPct = INVERTED_INTENTS.has(call.intent) ? spyReturnPct - stockReturnPct : stockReturnPct - spyReturnPct;
+      const alphaPct = computeAlpha(call.intent, stockReturnPct, spyReturnPct);
 
       const evaluation: ScreenerCallEvaluation = {
         evaluatedAt: new Date().toISOString(),
