@@ -22,6 +22,7 @@ export interface ScreenQuery {
   minMarketCapMillions: number | null;
   seedTickers: string[];
   requirements: ScreenQueryRequirements | null;
+  requiresInsiderBuying: boolean;
 }
 
 const SYSTEM_PROMPT = `You classify a user's free-form stock-market request into a structured screen query. Output strict JSON only, matching this exact shape:
@@ -30,7 +31,8 @@ const SYSTEM_PROMPT = `You classify a user's free-form stock-market request into
   "theme": { "label": string, "keywords": string[] } | null,
   "minMarketCapMillions": number | null,
   "seedTickers": string[],
-  "requirements": { "maxPE": number, "minRevenueGrowthPct": number, "minROICPct": number, "minFCFYieldPct": number } | null
+  "requirements": { "maxPE": number, "minRevenueGrowthPct": number, "minROICPct": number, "minFCFYieldPct": number } | null,
+  "requiresInsiderBuying": boolean
 }
 
 Rules:
@@ -40,6 +42,7 @@ Rules:
 - "seedTickers" is a list (0-12) of REAL, currently-trading, publicly-listed company ticker symbols whose PRIMARY, core business is genuinely in the requested theme/niche — not a company with only minor/incidental exposure, a coincidentally similar name, or a loosely related sector. For a narrow/specific niche (e.g. "physical AI", "quantum computing") this list is the PRIMARY way real companies reach the screen — a generic industry-code match often can't find them — so name every real, core-business-relevant, currently-listed company you're confident about, not just one or two, but double-check each one actually belongs before including it. Example of what NOT to do: for "cybersecurity stocks", include CrowdStrike/Palo Alto Networks/Fortinet (core business is cybersecurity) but do NOT include a large, well-known company just because it's prominent or vaguely tech-adjacent (e.g. Sanofi is a pharmaceutical company — wrong for "cybersecurity" even though it's a large real company). Every ticker is independently checked against a live market data feed for existence (not relevance) before use, so a wrong guess still reaches the user — precision here matters more than a long list. Use each company's EXACT, full ticker symbol (e.g. "TENB" for Tenable, not a truncated "TEN" — a truncated symbol can silently resolve to a completely different real company). Never invent a plausible-looking symbol or include a private/delisted company.
 - "requirements" captures explicit numeric thresholds the user actually stated (a P/E ceiling, a minimum revenue growth %, a minimum ROIC %, a minimum free cash flow yield %). Only include fields the user gave a real number for. Use null if none were stated.
 - "minMarketCapMillions" only if the user gave an explicit cap floor beyond generic "mega cap" wording (e.g. "above $50 billion" -> 50000). Use null otherwise.
+- "requiresInsiderBuying" is true only if the user explicitly asked for stocks with insider buying / executives or insiders buying shares / insider accumulation (including misspellings like "inside rbuying"). Otherwise false.
 
 You are only classifying the request and naming real companies you're confident about — never fabricate financial figures, and never invent a ticker symbol.`;
 

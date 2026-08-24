@@ -88,11 +88,6 @@ export async function POST(request: Request) {
           // "Rocket", "Under [Armour]") and would otherwise get misrouted to
           // that one ticker instead of running the screener.
           const interpreted = await interpretScreenQuery(message);
-          // interpreted === null only on a failed LLM call (rate limit,
-          // network) — fall back to the regex-detected read. A successful
-          // call is trusted as-is, including an explicit "not a screen"
-          // (intent: null) even if the regex thought otherwise.
-          const screenIntent = interpreted ? interpreted.intent : screenIntentRegex;
           const theme = interpreted ? (interpreted.theme ? themeQueryToFilter(interpreted.theme) : null) : themeRegex;
           let capFilter: CapFilter | null = capFilterRegex;
           if (interpreted?.minMarketCapMillions) {
@@ -104,6 +99,20 @@ export async function POST(request: Request) {
           }
           const seedTickers = interpreted?.seedTickers?.length ? await verifySeedTickers(interpreted.seedTickers) : [];
           const requirements = interpreted?.requirements ?? null;
+          const requireInsiderBuying = interpreted?.requiresInsiderBuying ?? false;
+          // interpreted === null only on a failed LLM call (rate limit,
+          // network) — fall back to the regex-detected read. A successful
+          // call is trusted as-is, EXCEPT a bare "intent: null" doesn't
+          // necessarily mean "not a screen" — the model can (and does, e.g.
+          // "search for stocks with inside rbuying") correctly extract a
+          // real constraint like requiresInsiderBuying/theme/requirements
+          // while leaving intent unset. Any of those signals still means
+          // "screen the market", defaulting to "best" the same way the
+          // regex path already does for a bare theme/cap filter.
+          const screenIntent = interpreted
+            ? (interpreted.intent ??
+              (theme || capFilter !== capFilterRegex || seedTickers.length || requirements || requireInsiderBuying ? "best" : null))
+            : screenIntentRegex;
 
           if (screenIntent) {
             const results = await runScreener(
@@ -112,12 +121,14 @@ export async function POST(request: Request) {
               capFilter,
               (update) => send({ type: "status", ...update }),
               seedTickers,
-              requirements
+              requirements,
+              requireInsiderBuying
             );
             if (results.length === 0) {
-              const reply = requirements
-                ? "Screened the market, but nothing currently trading meets all of those requirements together — try loosening one (a lower growth bar, or a higher P/E ceiling)."
-                : "Couldn't screen the market right now — data provider is temporarily unavailable, or no matches for that filter. Try again shortly, or ask about a specific ticker.";
+              const reply =
+                requirements || requireInsiderBuying
+                  ? "Screened the market, but nothing currently trading meets all of those requirements together — try loosening one (a lower growth bar, a higher P/E ceiling, or dropping the insider-buying requirement)."
+                  : "Couldn't screen the market right now — data provider is temporarily unavailable, or no matches for that filter. Try again shortly, or ask about a specific ticker.";
               send({ type: "done", reply });
               controller.close();
               return;
@@ -140,11 +151,21 @@ export async function POST(request: Request) {
 
           // Confirmed not a screen — now safe to try the fuzzy whole-message
           // company-name match ("tell me about the ride-sharing company
-          // Uber" with no explicit ticker typed).
-          const fuzzyTicker = await resolveTickerByFuzzyName(message);
-          if (fuzzyTicker) {
-            await runFreshAnalysis(fuzzyTicker);
-            return;
+          // Uber" with no explicit ticker typed), but ONLY when there's no
+          // active conversation to derail. Ordinary finance vocabulary
+          // regularly collides with real company names ("bull" -> Silver
+          // Bull Resources, "under" -> Under Armour, "100" -> a Nasdaq-100
+          // fund) — low-risk when starting a fresh lookup with nothing else
+          // to go on, but a follow-up mid-conversation ("so urs is average,
+          // in the middle of bull and bear") should never be able to hijack
+          // an existing thread into an unrelated ticker. When a card is
+          // already active, an ambiguous message stays a follow-up.
+          if (!lastCard) {
+            const fuzzyTicker = await resolveTickerByFuzzyName(message);
+            if (fuzzyTicker) {
+              await runFreshAnalysis(fuzzyTicker);
+              return;
+            }
           }
         }
 

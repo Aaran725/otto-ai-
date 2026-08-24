@@ -508,7 +508,8 @@ export async function runScreener(
   capFilter: CapFilter | null = null,
   onProgress?: ProgressFn,
   seedTickers: { symbol: string; companyName: string }[] = [],
-  requirements: ScreenQueryRequirements | null = null
+  requirements: ScreenQueryRequirements | null = null,
+  requireInsiderBuying = false
 ): Promise<ScreenerCandidate[]> {
   const cacheKey = [
     intent,
@@ -516,6 +517,7 @@ export async function runScreener(
     capFilter?.key,
     seedTickers.length ? `seed:${seedTickers.map((s) => s.symbol).sort().join(",")}` : null,
     requirements ? `req:${JSON.stringify(requirements)}` : null,
+    requireInsiderBuying ? "insider-buying" : null,
   ]
     .filter(Boolean)
     .join(":");
@@ -523,17 +525,31 @@ export async function runScreener(
   // scan really is instant then, not staged for show.
   return getScreenerCache<ScreenerCandidate[]>().getOrSet(cacheKey, async () => {
     // Macro (for regime-tilted weights) and the market-wide insider-cluster
-    // feed are both ticker-agnostic — fetched once per scan, in parallel
-    // with sourcing the pool, not once per candidate.
-    const [pool, macro, clusterFeed] = await Promise.all([
-      sourceCandidates(intent, theme, capFilter, seedTickers),
+    // feed are both ticker-agnostic — fetched once per scan. A "must have
+    // insider buying" request pulls a much wider feed (400 filings vs the
+    // default 100) — the default window is plenty for a nudge among an
+    // already-built pool, but too narrow to reliably supply a whole screen
+    // on its own.
+    const [macro, clusterFeed] = await Promise.all([
       fetchMacroContext().catch(() => null),
-      fetchInsiderClusterFeed().catch(() => [] as InsiderClusterEntry[]),
+      fetchInsiderClusterFeed(requireInsiderBuying ? 400 : 100).catch(() => [] as InsiderClusterEntry[]),
     ]);
+    // Union the real insider-buying feed into the candidate pool itself —
+    // otherwise a stock with genuine live insider buying could simply never
+    // appear in the deterministic universe sample and the "must have
+    // insider buying" filter below would have nothing to keep.
+    const buyingSeeds = requireInsiderBuying
+      ? clusterFeed.filter((e) => e.buys > e.sells && e.netShares > 0).map((e) => ({ symbol: e.symbol, companyName: e.companyName }))
+      : [];
+    const pool = await sourceCandidates(intent, theme, capFilter, [...seedTickers, ...buyingSeeds]);
     onProgress?.({ id: "scan", text: `Scanning ${pool.length} tickers…`, icon: "finnhub" });
 
     const weights = applyRegimeTilt(AXIS_WEIGHTS[intent], macro);
     const clusterBySymbol = new Map(clusterFeed.map((e) => [e.symbol, e]));
+    function hasNetInsiderBuying(symbol: string): boolean {
+      const entry = clusterBySymbol.get(symbol);
+      return !!entry && entry.buys > entry.sells && entry.netShares > 0;
+    }
 
     // Cheap (already in memory, no extra fetch) real-money signal applied
     // to the WHOLE pool, not just semifinalists — a stock with a live
@@ -577,6 +593,10 @@ export async function runScreener(
     }
     const ranked = scored
       .filter((s): s is ScreenerCandidate => s !== null)
+      // Hard requirement, not just a nudge — a user who explicitly asked
+      // for "stocks with insider buying" wants that guaranteed true of
+      // every result, not merely favored among them.
+      .filter((s) => !requireInsiderBuying || hasNetInsiderBuying(s.symbol))
       .sort((a, b) => {
         // Fully-scored candidates always outrank thin-coverage ones,
         // regardless of raw composite score — see the comment above.
@@ -699,7 +719,26 @@ export async function runScreener(
       }
       if (forecastUpsidePct !== undefined) enriched = { ...enriched, forecastUpsidePct };
 
-      return activity ? { ...enriched, insiderActivity: activity } : enriched;
+      if (activity) return { ...enriched, insiderActivity: activity };
+      // The per-company 90-day check (fetchInsiderActivity, above) can come
+      // back empty even when this candidate only made the list *because* of
+      // the market-wide cluster feed's net-buying signal (different source/
+      // window) — fall back to that same real data so the badge a user
+      // explicitly screened for doesn't just silently disappear.
+      const clusterEntry = clusterBySymbol.get(candidate.symbol);
+      if (clusterEntry) {
+        return {
+          ...enriched,
+          insiderActivity: {
+            buys: clusterEntry.buys,
+            sells: clusterEntry.sells,
+            netShares: clusterEntry.netShares,
+            direction: (clusterEntry.buys > clusterEntry.sells && clusterEntry.netShares > 0 ? "buying" : "mixed") as "buying" | "mixed",
+            transactions: [],
+          },
+        };
+      }
+      return enriched;
     });
 
     // Real signals nudge the final ranking rather than overriding the
