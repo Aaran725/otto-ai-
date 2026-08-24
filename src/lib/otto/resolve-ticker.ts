@@ -13,7 +13,10 @@ const STOPWORDS = new Set([
   "SHARES", "PRICE", "NOW", "TODAY",
 ]);
 
-function extractExplicitCandidates(text: string): string[] {
+/** Exported for the regression suite (resolve-ticker.test.ts) — this is the
+ * pure, network-free logic behind most of the word-collision bugs this
+ * session found and fixed ("P/E" -> stray "P" candidate, etc). */
+export function extractExplicitCandidates(text: string): string[] {
   const matches = text.match(/\$?[A-Za-z]{1,5}\b/g) ?? [];
   const candidates: string[] = [];
   for (const raw of matches) {

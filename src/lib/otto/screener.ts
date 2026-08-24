@@ -636,8 +636,17 @@ export async function runScreener(
     // above), analyst-rating-trend direction, and this stock's P/E
     // percentile against its real sector peers. Only run on the candidates
     // actually in contention for the final 5, so cost stays bounded even as
-    // the funnel above widens to hundreds of names.
-    const SEMIFINALIST_COUNT = 12;
+    // the funnel above widens to hundreds of names. Widened from 12 to 14
+    // (deliberately modest, not to the full pool) — both the insider check
+    // and the peer-valuation SIC lookup hit data.sec.gov directly per
+    // candidate, and SEC's shared rate limit is real and low: pushing this
+    // to 18 was tested live and caused requests to hang for minutes under
+    // this session's already-elevated SEC EDGAR usage. True market-wide
+    // peer-valuation coverage isn't safe to force inside one request — it's
+    // what the 24h per-SIC cache is for instead: as more screens run over
+    // time, more of the market's SIC codes end up cached and instantly
+    // available to later semifinalists for free, without a bigger burst.
+    const SEMIFINALIST_COUNT = 14;
     const semifinalists = ranked.slice(0, SEMIFINALIST_COUNT);
     const rest = ranked.slice(SEMIFINALIST_COUNT);
     onProgress?.({
