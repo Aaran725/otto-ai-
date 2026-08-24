@@ -898,6 +898,47 @@ export async function runScreener(
       return key;
     }
 
+    // Phase C: raise the bar for what "makes the list" at all, as real
+    // filters applied before selection — not just nudges that reshuffle
+    // order, and not just a reconciliation note explaining a gap after the
+    // fact (see groq.ts's buildReconciliationNoteFromSnapshot, which only
+    // explains divergence for a single-stock lookup, never blocks a
+    // screener pick from being shown).
+    //
+    // "undervalued" requires real forecast/target upside of at least 15% —
+    // a pick that only cleared valuation ratios but has ~4% real upside
+    // isn't "undervalued" in any meaningful sense (this was the original,
+    // explicit complaint this whole plan started from). A candidate with no
+    // known forecastUpsidePct (never reached Stage 3 enrichment) can't be
+    // verified to clear the bar, so it's excluded rather than assumed safe.
+    const MIN_UPSIDE_FLOOR: Partial<Record<ScreenIntent, number>> = { undervalued: 15 };
+    const upsideFloor = MIN_UPSIDE_FLOOR[intent];
+
+    // "best" reuses the same real-signal logic the single-stock conviction
+    // score is built from — a minimum blended composite score AND the same
+    // "insufficient data" bar (thinCoverage) that gates a single-stock
+    // card's dataQuality — as an actual filter, not just a ranking nudge. A
+    // stock flagged on two independent real-world signals at once (insiders
+    // selling AND analyst sentiment worsening) is vetoed outright regardless
+    // of its historical composite score — that combination is exactly what
+    // "conviction" is supposed to catch that a backward-looking fundamentals
+    // score alone can't.
+    const CONVICTION_GATE_MIN_SCORE: Partial<Record<ScreenIntent, number>> = { best: 65 };
+    const convictionMin = CONVICTION_GATE_MIN_SCORE[intent];
+
+    function meetsBar(c: ScreenerCandidate, key: number): boolean {
+      if (upsideFloor !== undefined) {
+        if (c.forecastUpsidePct === undefined || c.forecastUpsidePct < upsideFloor) return false;
+      }
+      if (convictionMin !== undefined) {
+        if (c.thinCoverage) return false;
+        if (key < convictionMin) return false;
+        const trend = ratingTrendBySymbol.get(c.symbol);
+        if (c.insiderActivity?.direction === "selling" && trend?.direction === "worsening") return false;
+      }
+      return true;
+    }
+
     // Sector diversification: a real desk wouldn't hand back 5 correlated
     // mega-cap tech names just because they all scored well on the same
     // axis. Greedy pass through the rank-sorted list, capping how many
@@ -927,10 +968,12 @@ export async function runScreener(
       return selected;
     }
 
-    const rankedFinalists = [...withInsider, ...rest].sort((a, b) => {
-      if (a.thinCoverage !== b.thinCoverage) return a.thinCoverage ? 1 : -1;
-      return ascending ? rankKey(a) - rankKey(b) : rankKey(b) - rankKey(a);
-    });
+    const rankedFinalists = [...withInsider, ...rest]
+      .filter((c) => meetsBar(c, rankKey(c)))
+      .sort((a, b) => {
+        if (a.thinCoverage !== b.thinCoverage) return a.thinCoverage ? 1 : -1;
+        return ascending ? rankKey(a) - rankKey(b) : rankKey(b) - rankKey(a);
+      });
     // "avoid" isn't a picks list — if a sector genuinely has the most red
     // flags, showing more than 2 from it is the honest answer, not a flaw
     // to correct for.

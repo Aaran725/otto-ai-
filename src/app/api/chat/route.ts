@@ -127,10 +127,20 @@ export async function POST(request: Request) {
             );
             if (results.length === 0) {
               recordEvent("screener_zero_results", { intent: screenIntent, theme: theme?.key, capFilter: capFilter?.key });
+              // Phase C: "undervalued" and "best" now apply a real bar
+              // (minimum forecast upside / conviction gate — see
+              // runScreener) before a candidate can appear at all, so a
+              // clean sweep genuinely can mean "nothing today clears the
+              // bar," not just a data-provider hiccup. Say that honestly
+              // instead of serving a mediocre pick to fill 5 slots.
               const reply =
                 requirements || requireInsiderBuying
                   ? "Screened the market, but nothing currently trading meets all of those requirements together — try loosening one (a lower growth bar, a higher P/E ceiling, or dropping the insider-buying requirement)."
-                  : "Couldn't screen the market right now — data provider is temporarily unavailable, or no matches for that filter. Try again shortly, or ask about a specific ticker.";
+                  : screenIntent === "undervalued"
+                    ? "Screened the market, but nothing right now clears the bar for genuinely undervalued — at least 15% real forecast upside to target, not just a cheap-looking ratio. Try again later as prices move, or ask about a specific ticker."
+                    : screenIntent === "best"
+                      ? "Screened the market, but nothing right now clears Otto's conviction bar for a top pick — either the data was too thin to trust, or a real red flag (insider selling plus a worsening analyst trend) knocked out the leading candidates. Try again later, or ask about a specific ticker."
+                      : "Couldn't screen the market right now — data provider is temporarily unavailable, or no matches for that filter. Try again shortly, or ask about a specific ticker.";
               send({ type: "done", reply });
               controller.close();
               return;
@@ -138,9 +148,17 @@ export async function POST(request: Request) {
             const label = [capFilter?.label, theme?.label].filter(Boolean).join(" ") || null;
             const fullLabel = label ? `${label} — ${intentLabel(screenIntent)}` : intentLabel(screenIntent);
             const top = results[0];
+            // A gated intent (undervalued/best) that came back with fewer
+            // than 5 real picks should say so, not silently present a
+            // shorter list as if 5 was never the target — same honesty
+            // principle as the zero-results case above.
+            const shortListNote =
+              results.length < 5 && (screenIntent === "undervalued" || screenIntent === "best")
+                ? ` Only ${results.length} ${results.length === 1 ? "stock" : "stocks"} cleared the bar today — showing real picks only, not padding to 5.`
+                : "";
             send({
               type: "done",
-              reply: `Screened the market for "${fullLabel}" — top pick is ${top.symbol} at $${top.price.toFixed(2)}. Tap any row for the full research.`,
+              reply: `Screened the market for "${fullLabel}" — top pick is ${top.symbol} at $${top.price.toFixed(2)}.${shortListNote} Tap any row for the full research.`,
               screener: {
                 intentLabel: fullLabel,
                 results: results.map((r, i) => ({ rank: i + 1, ...r })),
