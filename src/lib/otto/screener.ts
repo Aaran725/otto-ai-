@@ -825,7 +825,21 @@ export async function runScreener(
     // "avoid" isn't a picks list — if a sector genuinely has the most red
     // flags, showing more than 2 from it is the honest answer, not a flaw
     // to correct for.
-    const finalists = intent === "avoid" ? rankedFinalists.slice(0, 5) : selectDiversified(rankedFinalists, 5);
+    const selectedFinalists = intent === "avoid" ? rankedFinalists.slice(0, 5) : selectDiversified(rankedFinalists, 5);
+    // The displayed score must reflect the same real signals used to rank —
+    // otherwise a stock can visibly carry an "insiders selling" flag while
+    // still showing a 100/100 screen score, which reads as a contradiction
+    // (confirmed live: AYI/UBER/INCY all displayed 100 despite an insider-
+    // selling badge, because the nudges only ever affected sort order, never
+    // the number shown next to them). rankKey already folds in every real
+    // signal (insider activity, rating trend, sector valuation, forecast
+    // upside, earnings consistency, short interest) on top of the raw
+    // Snowflake composite — so it becomes the displayed score too, clamped
+    // back to the 0-100 scale the UI expects.
+    const finalists = selectedFinalists.map((c) => ({
+      ...c,
+      compositeScore: Math.max(0, Math.min(100, Math.round(rankKey(c)))),
+    }));
 
     // Stage 4: only the actual final 5 get a real 10-K excerpt — purely
     // presentational (doesn't affect ranking, unlike the insider check),
