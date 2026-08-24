@@ -20,6 +20,8 @@ import { fetchEarningsRecord, type EarningsRecord } from "./earnings";
 import { fetchShortInterest, type ShortInterestData } from "./short-interest";
 import type { ProgressFn } from "./chat-types";
 import type { ScreenQueryRequirements } from "./screen-query";
+import { computeValueScore } from "./value-score";
+import { computeForecastTargets } from "./forecast";
 
 export type ScreenIntent = "undervalued" | "momentum" | "best" | "quality" | "avoid";
 
@@ -434,6 +436,24 @@ function scoreCandidate(intent: ScreenIntent, sf: OttoSnowflakeScores, weights: 
   return Math.round((weightedSum / weightTotal) * 100);
 }
 
+// The Snowflake valuation axis is a discrete pass/fail count (0-6) — a P/E
+// of 24.9 and a P/E of 8 both just "pass P/E < 25" and score identically.
+// That's fine for the single-stock card's explainable-checks methodology,
+// but it means dozens of real candidates tie at a perfect composite score
+// in the screener, with no way to tell "barely cheap" from "genuinely
+// cheap" apart. Blending in the continuous value-score (value-score.ts,
+// same underlying ratios, zero extra cost) breaks those ties by real
+// magnitude instead of tie-break-nudge luck — weighted harder for
+// "undervalued" specifically, since "how cheap, really" is the entire
+// point of that screen.
+const VALUE_SCORE_BLEND: Partial<Record<ScreenIntent, number>> = { undervalued: 0.5, best: 0.45 };
+
+function applyValueScoreBlend(intent: ScreenIntent, baseComposite: number, valueScore: number | null): number {
+  const blend = VALUE_SCORE_BLEND[intent];
+  if (!blend || valueScore === null) return baseComposite;
+  return Math.round(baseComposite * (1 - blend) + valueScore * blend);
+}
+
 /**
  * Passive cross-reference for the screener-vs-conviction divergence check
  * (see groq.ts) — reads the existing per-symbol snapshot cache (now Redis,
@@ -463,6 +483,11 @@ function buildKeyStat(
   const roic = data.keyMetrics?.returnOnInvestedCapital;
   switch (intent) {
     case "undervalued":
+      // Once known (semifinalist stage), real target upside is the headline
+      // — "undervalued" should say how undervalued, not just cite a P/E.
+      if (forecastUpsidePct !== undefined) {
+        return `${forecastUpsidePct >= 0 ? "+" : ""}${forecastUpsidePct.toFixed(0)}% to target${pe !== undefined ? ` · P/E ${pe.toFixed(1)}x` : ""}`;
+      }
       return pe !== undefined
         ? `P/E ${pe.toFixed(1)}x · Valuation ${sf.valuation.score}/6`
         : `Valuation ${sf.valuation.score}/6`;
@@ -591,11 +616,12 @@ export async function runScreener(
         const snap = await getSymbolSnapshot(c.symbol);
         if (!snap) return null;
         if (!passesRequirements(snap, requirements)) return null;
+        const valueScore = computeValueScore(snap.ratios, snap.keyMetrics);
         return {
           symbol: c.symbol,
           companyName: c.companyName,
           price: snap.price,
-          compositeScore: scoreCandidate(intent, snap.sf, weights),
+          compositeScore: applyValueScoreBlend(intent, scoreCandidate(intent, snap.sf, weights), valueScore),
           keyStat: buildKeyStat(intent, snap, snap.sf),
           // Flagged rather than hidden so a data-starved spike never looks
           // equivalent to a fully-scored pick (the "rocket stock" problem).
@@ -693,10 +719,11 @@ export async function runScreener(
         const peerValuation = await fetchPeerValuation(candidate.symbol, pe).catch(() => null);
         if (peerValuation) sectorPercentileBySymbol.set(candidate.symbol, peerValuation.percentile);
       }
-      const forecastUpsidePct =
+      const analystUpsidePct =
         priceTarget && candidate.price > 0 ? ((priceTarget.targetConsensus - candidate.price) / candidate.price) * 100 : undefined;
 
       let enriched = candidate;
+      let ottoUpsidePct: number | undefined;
       if (financialsTrend && fundamentals) {
         const enrichedBundle: StockBundle = {
           symbol: candidate.symbol,
@@ -720,20 +747,32 @@ export async function runScreener(
           cashFlow: financialsTrend.cashFlow,
         };
         const sf = computeSnowflake(enrichedBundle);
+        // Otto's own conservative forecast (same deterministic model used on
+        // every single-stock card — forecast.ts) computed here for the
+        // first time in the screener path, now that semifinalists have the
+        // real income/cash-flow data it needs. This is what "wire Otto's
+        // own forecast into screener ranking" means literally: "undervalued"
+        // should mean "trades below what Otto's own model says it's worth,"
+        // not just "cleared some ratio thresholds."
+        const ottoForecast = computeForecastTargets(enrichedBundle);
+        if (candidate.price > 0) {
+          ottoUpsidePct = ((ottoForecast.baseTarget - candidate.price) / candidate.price) * 100;
+        }
+        const valueScore = computeValueScore(fundamentals.ratios, fundamentals.keyMetrics);
         const fundamentalsChecksRun =
           sf.valuation.checks.length + sf.growth.checks.length + sf.quality.checks.length + sf.financialHealth.checks.length;
         enriched = {
           ...candidate,
-          compositeScore: scoreCandidate(intent, sf, weights),
+          compositeScore: applyValueScoreBlend(intent, scoreCandidate(intent, sf, weights), valueScore),
           keyStat: buildKeyStat(
             intent,
             { ratios: fundamentals.ratios, keyMetrics: fundamentals.keyMetrics, changePercentage: enrichedBundle.quote.changePercentage },
             sf,
-            forecastUpsidePct
+            analystUpsidePct
           ),
           thinCoverage: fundamentalsChecksRun <= 3,
         };
-      } else if (forecastUpsidePct !== undefined && intent === "momentum") {
+      } else if (analystUpsidePct !== undefined && intent === "momentum") {
         // financialsTrend missing but we still have the target price —
         // swap in the upside-to-target display without recomputing the
         // Snowflake score (that needs the fuller bundle from the branch
@@ -742,9 +781,19 @@ export async function runScreener(
         const momentumScore = momentumScoreMatch ? momentumScoreMatch[1] : "?/6";
         enriched = {
           ...candidate,
-          keyStat: `${forecastUpsidePct >= 0 ? "+" : ""}${forecastUpsidePct.toFixed(0)}% to analyst target · Momentum ${momentumScore}`,
+          keyStat: `${analystUpsidePct >= 0 ? "+" : ""}${analystUpsidePct.toFixed(0)}% to analyst target · Momentum ${momentumScore}`,
         };
       }
+      // Blend Street's analyst-target upside with Otto's own conservative
+      // model when both are available — real forward return isn't just one
+      // number, and averaging the two is more honest than picking either
+      // alone. Whichever one is actually available (financialsTrend can
+      // fail independently of the Yahoo price-target call) still counts on
+      // its own rather than dropping the whole signal.
+      const forecastUpsidePct =
+        analystUpsidePct !== undefined && ottoUpsidePct !== undefined
+          ? (analystUpsidePct + ottoUpsidePct) / 2
+          : (analystUpsidePct ?? ottoUpsidePct);
       if (forecastUpsidePct !== undefined) enriched = { ...enriched, forecastUpsidePct };
 
       if (activity) return { ...enriched, insiderActivity: activity };
@@ -771,17 +820,22 @@ export async function runScreener(
 
     // Real signals nudge the final ranking rather than overriding the
     // fundamentals score outright — compositeScore itself stays a pure
-    // reflection of the Snowflake data so it remains comparable across
-    // runs; these only decide ordering among near-tied semifinalists.
-    // FORECAST_UPSIDE_NUDGE is deliberately the largest of the bunch for the
-    // momentum/"rocket" screen — real forward analyst-target upside is what
-    // "might go boom up in a year" actually means, not just trailing price
-    // trend (confirmed by user feedback: a stock already near its analyst
-    // target, however strong its recent trend, isn't a "rocket").
+    // reflection of the Snowflake data (now blended with the continuous
+    // value score, see applyValueScoreBlend) so it remains comparable
+    // across runs; these only decide ordering among near-tied semifinalists.
+    // FORECAST_UPSIDE_NUDGE is deliberately large for momentum ("might go
+    // boom up in a year" means real forward upside, not just trailing price
+    // trend) AND for undervalued/best — "how much real upside is here" is
+    // just as central to "undervalued"/"best pick" as it is to "rocket
+    // stock," and treating it as a minor ±6 tiebreaker for those intents
+    // was exactly why "undervalued" kept surfacing ~4% upside picks: the
+    // one signal that actually measures opportunity size was barely
+    // counted. Same logic for SECTOR_NUDGE (real peer-relative cheapness)
+    // on "undervalued" specifically.
     const INSIDER_NUDGE = 4;
     const RATING_TREND_NUDGE = 3;
-    const SECTOR_NUDGE_MAX = 4; // scaled by percentile: cheapest-vs-peers = full nudge, priciest = full penalty
-    const FORECAST_UPSIDE_NUDGE_MAX = intent === "momentum" ? 16 : 6; // scaled by upside%, capped at +/-50%
+    const SECTOR_NUDGE_MAX = intent === "undervalued" ? 10 : 4; // scaled by percentile: cheapest-vs-peers = full nudge, priciest = full penalty
+    const FORECAST_UPSIDE_NUDGE_MAX = intent === "momentum" ? 16 : intent === "undervalued" ? 12 : intent === "best" ? 8 : 6; // scaled by upside%, capped at +/-50%
     const EARNINGS_NUDGE_MAX = 3; // scaled by beat/miss ratio over the last up-to-4 reported quarters
     const SHORT_INTEREST_NUDGE_MAX = 3; // high/rising short interest is a red flag regardless of intent
     function rankKey(c: ScreenerCandidate): number {
