@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getScreenerCallsWithLiveMarks, getPortfolioSummary } from "@/lib/otto/screener-track-record";
+import { getScreenerCallsWithLiveMarks, getPortfolioSummary, getFlagshipSummary } from "@/lib/otto/screener-track-record";
 
 export const metadata = { title: "Screener Track Record (private) — Otto AI" };
 export const dynamic = "force-dynamic";
@@ -43,8 +43,13 @@ export default async function ScreenerTrackRecordPage({
     );
   }
 
-  const [calls, portfolio] = await Promise.all([getScreenerCallsWithLiveMarks(), getPortfolioSummary()]);
+  const [calls, portfolio, flagship] = await Promise.all([
+    getScreenerCallsWithLiveMarks(),
+    getPortfolioSummary(),
+    getFlagshipSummary(),
+  ]);
   calls.sort((a, b) => new Date(b.calledAt).getTime() - new Date(a.calledAt).getTime());
+  const flagshipAlpha = flagship.avgLiveAlphaPct ?? flagship.avgD30AlphaPct ?? flagship.avgD90AlphaPct ?? flagship.avgD180AlphaPct;
 
   return (
     <div className="mx-auto min-h-screen max-w-6xl px-6 py-12 text-otto-text">
@@ -88,6 +93,24 @@ export default async function ScreenerTrackRecordPage({
         rule set would be worth today.
       </p>
 
+      <div className="mt-4 flex items-center gap-4 rounded-xl border border-otto-gold/30 bg-otto-gold/[0.04] p-3">
+        <span className="otto-text-caption shrink-0 text-[10px] font-semibold uppercase tracking-wide text-otto-gold">
+          ★ Flagship
+        </span>
+        <span className="text-sm text-otto-text-muted">
+          {flagship.count} calls — Otto&apos;s single #1-ranked pick per scan, not diluted by picks 2-5.
+          {flagshipAlpha !== null && (
+            <>
+              {" "}
+              Avg alpha:{" "}
+              <span className={`font-medium ${flagshipAlpha >= 0 ? "text-otto-bull" : "text-otto-bear"}`}>
+                {fmtPct(flagshipAlpha)}
+              </span>
+            </>
+          )}
+        </span>
+      </div>
+
       {calls.length === 0 ? (
         <p className="otto-text-body mt-8 text-otto-text-muted">
           No calls logged yet — every fresh screener scan gets recorded here automatically.
@@ -112,9 +135,12 @@ export default async function ScreenerTrackRecordPage({
             </thead>
             <tbody>
               {calls.map((c) => (
-                <tr key={c.id} className="border-b border-otto-border/50 last:border-0">
+                <tr key={c.id} className={`border-b border-otto-border/50 last:border-0 ${c.isFlagship ? "bg-otto-gold/[0.03]" : ""}`}>
                   <td className="px-4 py-3">
-                    <div className="font-medium">{c.symbol}</div>
+                    <div className="flex items-center gap-1.5 font-medium">
+                      {c.isFlagship && <span className="text-otto-gold" title="Flagship — #1 pick of its scan">★</span>}
+                      {c.symbol}
+                    </div>
                     <div className="otto-text-caption text-otto-text-faint">{c.companyName}</div>
                   </td>
                   <td className="px-4 py-3 capitalize text-otto-text-muted">{c.intent}</td>

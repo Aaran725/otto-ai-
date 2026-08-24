@@ -71,6 +71,30 @@ function extractOpenMarketTransactions(xml: string): RawTransaction[] {
   return out;
 }
 
+interface ReportingOwnerInfo {
+  isOfficer: boolean;
+  officerTitle: string | null;
+}
+
+// A CEO or CFO buying with their own money is a categorically stronger
+// signal than a random VP marked "officer" — Form 4's own isOfficer flag
+// doesn't distinguish the two, only its free-text officerTitle does. This
+// pattern is deliberately narrow (the real C-suite roles that move a
+// stock's story) rather than matching every officer title, so the signal
+// stays meaningfully different from the general insider-activity nudge
+// already computed above, not just a relabeled duplicate of it.
+const C_SUITE_TITLE_PATTERN = /chief executive|\bceo\b|chief financial|\bcfo\b|chief operating|\bcoo\b|\bpresident\b/i;
+
+/** Each Form 4 XML document is one filer's own filing — the reporting
+ * owner's role (officer/title) lives in a single block per document,
+ * separate from the transaction blocks already parsed above. */
+function extractReportingOwnerInfo(xml: string): ReportingOwnerInfo {
+  const relBlock = xml.match(/<reportingOwnerRelationship>[\s\S]*?<\/reportingOwnerRelationship>/)?.[0] ?? "";
+  const isOfficer = /<isOfficer>\s*1\s*<\/isOfficer>/.test(relBlock);
+  const officerTitle = relBlock.match(/<officerTitle>\s*([^<]+?)\s*<\/officerTitle>/)?.[1] ?? null;
+  return { isOfficer, officerTitle };
+}
+
 export interface InsiderTransaction {
   date: string; // ISO date, e.g. "2026-06-12"
   code: "P" | "S";
@@ -86,6 +110,11 @@ export interface InsiderActivity {
   direction: "buying" | "selling" | "mixed";
   /** Individual open-market transactions, newest first, for the timeline view. */
   transactions: InsiderTransaction[];
+  // C-suite-specific subset of the same transactions — a real, separate
+  // signal from general insider activity (see C_SUITE_TITLE_PATTERN).
+  officerNetShares: number;
+  hasCSuiteBuying: boolean; // net C-suite buying specifically, not just any insider
+  topOfficerTitle: string | null; // e.g. "Chief Executive Officer", for display
 }
 
 /**
@@ -125,21 +154,28 @@ export async function fetchInsiderActivity(symbol: string): Promise<InsiderActiv
 
     const parsed = await mapWithConcurrency(targets, 5, async (t) => {
       const xml = await fetchText(t.url);
-      return xml ? extractOpenMarketTransactions(xml) : [];
+      if (!xml) return { transactions: [] as RawTransaction[], owner: null as ReportingOwnerInfo | null };
+      return { transactions: extractOpenMarketTransactions(xml), owner: extractReportingOwnerInfo(xml) };
     });
 
     let buys = 0;
     let sells = 0;
     let netShares = 0;
+    let officerNetShares = 0;
+    let topOfficerTitle: string | null = null;
     const transactions: InsiderTransaction[] = [];
-    for (const txns of parsed) {
+    for (const { transactions: txns, owner } of parsed) {
+      const isCSuite = Boolean(owner?.isOfficer && owner.officerTitle && C_SUITE_TITLE_PATTERN.test(owner.officerTitle));
+      if (isCSuite && !topOfficerTitle) topOfficerTitle = owner!.officerTitle;
       for (const t of txns) {
         if (t.code === "P") {
           buys++;
           netShares += t.shares;
+          if (isCSuite) officerNetShares += t.shares;
         } else {
           sells++;
           netShares -= t.shares;
+          if (isCSuite) officerNetShares -= t.shares;
         }
         transactions.push({
           date: t.date ?? new Date().toISOString().slice(0, 10),
@@ -159,6 +195,9 @@ export async function fetchInsiderActivity(symbol: string): Promise<InsiderActiv
       netShares,
       direction: netShares > 0 ? "buying" : netShares < 0 ? "selling" : "mixed",
       transactions,
+      officerNetShares,
+      hasCSuiteBuying: officerNetShares > 0,
+      topOfficerTitle,
     };
   });
 }

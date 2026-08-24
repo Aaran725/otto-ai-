@@ -46,6 +46,7 @@ export interface ScreenerCallRecord {
   peakAt: string; // ISO timestamp of when peakPrice was set
   allocatedAmount: number; // simulated dollars staked at call time — see PORTFOLIO_* below
   closed: boolean; // true once its d180 milestone has been evaluated and capital returned to cash
+  isFlagship: boolean; // true only for the #1-ranked pick of its scan — see logScreenerCall
   evaluations: Partial<Record<`d${Milestone}`, ScreenerCallEvaluation>>;
 }
 
@@ -103,9 +104,16 @@ function targetAllocation(compositeScore: number): number {
  * intent+symbol pair was already logged within the last 30 days. The
  * screener cache refreshes every 4h, so without this cooldown the same
  * pick would get logged dozens of times a month, inflating the record with
- * one bet counted repeatedly instead of distinct calls. Fire-and-forget
- * from the caller (runScreener) — a logging hiccup must never affect the
- * real screener response the user actually sees.
+ * one bet counted repeatedly instead of distinct calls.
+ *
+ * isFlagship marks only the #1-ranked pick of its scan — a real,
+ * pre-committed rule (the caller passes rank position, not a retroactive
+ * "which one did best" call), so a headline "flagship" stat isn't diluted
+ * by picks 2-5. All 5 stay in the full record and the $10k simulation
+ * either way; flagship is a reporting lens on top, not a second, smaller
+ * log. Awaited sequentially by the caller (see runScreener), not fire-
+ * and-forget — a logging hiccup still can't affect the real screener
+ * response, since errors are caught internally below.
  */
 export async function logScreenerCall(params: {
   intent: ScreenIntent;
@@ -113,6 +121,7 @@ export async function logScreenerCall(params: {
   companyName: string;
   price: number;
   compositeScore: number;
+  isFlagship: boolean;
 }): Promise<void> {
   // "avoid" isn't a recommendation to buy — a track record is fundamentally
   // about "here's what we told people to consider, did it work out," and an
@@ -159,6 +168,7 @@ export async function logScreenerCall(params: {
       peakAt: nowIso,
       allocatedAmount,
       closed: false,
+      isFlagship: params.isFlagship,
       evaluations: {},
     };
     await Promise.all([
@@ -319,6 +329,38 @@ export async function getPortfolioSummary(): Promise<PortfolioSummary> {
     totalReturnPct: ((totalValue - STARTING_CASH) / STARTING_CASH) * 100,
     openPositionCount: open.length,
     closedPositionCount: callsWithLive.length - open.length,
+  };
+}
+
+export interface FlagshipSummary {
+  count: number;
+  avgLiveAlphaPct: number | null; // across flagship calls with a resolvable live quote
+  avgD30AlphaPct: number | null;
+  avgD90AlphaPct: number | null;
+  avgD180AlphaPct: number | null;
+}
+
+function average(values: number[]): number | null {
+  if (values.length === 0) return null;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+/**
+ * The flagship-only lens on the same data — Otto's single highest-
+ * conviction pick per scan (isFlagship), not diluted by picks 2-5. This is
+ * the number worth leading with once the record is public: a smaller,
+ * cleaner, higher-bar sample rather than the full portfolio's blended
+ * average.
+ */
+export async function getFlagshipSummary(): Promise<FlagshipSummary> {
+  const calls = await getScreenerCallsWithLiveMarks();
+  const flagship = calls.filter((c) => c.isFlagship);
+  return {
+    count: flagship.length,
+    avgLiveAlphaPct: average(flagship.map((c) => c.live?.alphaPct).filter((v): v is number => v !== undefined)),
+    avgD30AlphaPct: average(flagship.map((c) => c.evaluations.d30?.alphaPct).filter((v): v is number => v !== undefined)),
+    avgD90AlphaPct: average(flagship.map((c) => c.evaluations.d90?.alphaPct).filter((v): v is number => v !== undefined)),
+    avgD180AlphaPct: average(flagship.map((c) => c.evaluations.d180?.alphaPct).filter((v): v is number => v !== undefined)),
   };
 }
 

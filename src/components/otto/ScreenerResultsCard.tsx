@@ -219,6 +219,11 @@ export function ScreenerResultsCard({
                       Insiders {r.insiderActivity.direction} · {r.insiderActivity.buys}B/{r.insiderActivity.sells}S 90d
                     </span>
                   )}
+                  {r.insiderActivity?.hasCSuiteBuying && (
+                    <span className="inline-block rounded-full border border-otto-gold/50 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-otto-gold">
+                      ★ {r.insiderActivity.topOfficerTitle ?? "Officer"} buying
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="shrink-0 text-right">

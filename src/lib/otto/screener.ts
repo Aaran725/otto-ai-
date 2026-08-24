@@ -919,6 +919,12 @@ export async function runScreener(
             netShares: clusterEntry.netShares,
             direction: (clusterEntry.buys > clusterEntry.sells && clusterEntry.netShares > 0 ? "buying" : "mixed") as "buying" | "mixed",
             transactions: [],
+            // The market-wide cluster feed has no per-filer role data (that
+            // only exists in the per-company Form 4 check, fetchInsiderActivity)
+            // — honestly unknown here, not assumed zero-signal.
+            officerNetShares: 0,
+            hasCSuiteBuying: false,
+            topOfficerTitle: null,
           },
         };
       }
@@ -940,6 +946,14 @@ export async function runScreener(
     // counted. Same logic for SECTOR_NUDGE (real peer-relative cheapness)
     // on "undervalued" specifically.
     const INSIDER_NUDGE = 4;
+    // Stacks on top of INSIDER_NUDGE, not instead of it — a CEO or CFO
+    // buying with their own money is a categorically stronger signal than
+    // a random VP marked "insider" (see C_SUITE_TITLE_PATTERN in
+    // insider.ts). No symmetric penalty for officer selling: routine
+    // C-suite selling (diversification, tax planning) is common and not
+    // the same real signal as buying is — this only ever adds conviction,
+    // never subtracts it, unlike the general insider nudge above.
+    const OFFICER_BUYING_NUDGE = 3;
     const RATING_TREND_NUDGE = 3;
     const SECTOR_NUDGE_MAX = intent === "undervalued" ? 10 : 4; // scaled by percentile: cheapest-vs-peers = full nudge, priciest = full penalty
     const FORECAST_UPSIDE_NUDGE_MAX = intent === "momentum" ? 16 : intent === "undervalued" ? 12 : intent === "best" ? 8 : 6; // scaled by upside%, capped at +/-50%
@@ -949,6 +963,7 @@ export async function runScreener(
       let key = c.compositeScore + clusterNudgeFor(c.symbol);
       if (c.insiderActivity?.direction === "buying") key += INSIDER_NUDGE;
       else if (c.insiderActivity?.direction === "selling") key -= INSIDER_NUDGE;
+      if (c.insiderActivity?.hasCSuiteBuying) key += OFFICER_BUYING_NUDGE;
       const trend = ratingTrendBySymbol.get(c.symbol);
       if (trend?.direction === "improving") key += RATING_TREND_NUDGE;
       else if (trend?.direction === "worsening") key -= RATING_TREND_NUDGE;
@@ -991,6 +1006,9 @@ export async function runScreener(
       }
       if (c.insiderActivity?.direction === "buying") nudges.push({ label: "Insider buying (90d)", points: INSIDER_NUDGE });
       else if (c.insiderActivity?.direction === "selling") nudges.push({ label: "Insider selling (90d)", points: -INSIDER_NUDGE });
+      if (c.insiderActivity?.hasCSuiteBuying) {
+        nudges.push({ label: `${c.insiderActivity.topOfficerTitle ?? "Officer"} buying with own money`, points: OFFICER_BUYING_NUDGE });
+      }
       const trend = ratingTrendBySymbol.get(c.symbol);
       if (trend?.direction === "improving") nudges.push({ label: "Analyst ratings improving", points: RATING_TREND_NUDGE });
       else if (trend?.direction === "worsening") nudges.push({ label: "Analyst ratings worsening", points: -RATING_TREND_NUDGE });
@@ -1174,13 +1192,15 @@ export async function runScreener(
     // sequential Redis round-trips) is small next to the rest of the scan
     // and still never blocks or fails the real response — logScreenerCall
     // catches its own errors internally.
-    for (const c of finalists) {
+    for (let i = 0; i < finalists.length; i++) {
+      const c = finalists[i];
       await logScreenerCall({
         intent,
         symbol: c.symbol,
         companyName: c.companyName,
         price: c.price,
         compositeScore: c.compositeScore,
+        isFlagship: i === 0,
       });
     }
 

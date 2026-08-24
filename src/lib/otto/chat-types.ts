@@ -40,7 +40,14 @@ export interface ScreenerResultItem {
   compositeScore: number;
   keyStat: string;
   thinCoverage?: boolean; // true when ranked without real fundamentals data (e.g. a momentum spike with no ratios/metrics)
-  insiderActivity?: { buys: number; sells: number; netShares: number; direction: "buying" | "selling" | "mixed" };
+  insiderActivity?: {
+    buys: number;
+    sells: number;
+    netShares: number;
+    direction: "buying" | "selling" | "mixed";
+    hasCSuiteBuying?: boolean;
+    topOfficerTitle?: string | null;
+  };
   filingNote?: string; // real excerpt from the company's own 10-K
   forecastUpsidePct?: number;
   analystUpsidePct?: number; // real analyst-consensus upside alone — "Otto vs Wall Street" screen
