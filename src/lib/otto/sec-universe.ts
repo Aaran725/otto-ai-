@@ -1,4 +1,5 @@
 import { getUniverseCache } from "./cache";
+import { withinSecEdgarBudget } from "./rate-limit";
 
 const SEC_USER_AGENT = process.env.SEC_USER_AGENT ?? "Otto AI research@ottoai.app";
 
@@ -14,6 +15,29 @@ export interface UniverseEntry {
 }
 
 /**
+ * Like TtlCache.getOrSet, but a transient fetch failure's empty fallback
+ * ([]/{}) is returned to THIS caller without being written to the shared
+ * cache — confirmed live: a single failed company_tickers.json fetch
+ * cached an empty CIK map for a full 24h, silently breaking every fresh
+ * SIC/insider lookup for a symbol not already individually cached, while
+ * previously-cached per-symbol results kept working and masked the outage.
+ * Every bulk SEC universe fetch below uses this instead of the plain
+ * getOrSet a real failure would otherwise poison for a full day.
+ */
+async function getOrSetNonEmpty<T extends unknown[] | Record<string, unknown>>(
+  cache: { get(key: string): Promise<T | undefined>; set(key: string, value: T): Promise<void> },
+  key: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const cached = await cache.get(key);
+  if (cached !== undefined) return cached;
+  const value = await fn();
+  const isEmpty = Array.isArray(value) ? value.length === 0 : Object.keys(value).length === 0;
+  if (!isEmpty) await cache.set(key, value);
+  return value;
+}
+
+/**
  * SEC's company_tickers.json is free, unlimited, no API key — a complete
  * list of SEC-registered tickers, empirically ordered roughly by prominence
  * (mega-caps first: NVDA/AAPL/GOOGL/MSFT/AMZN topped it in testing). This
@@ -26,7 +50,7 @@ export interface UniverseEntry {
  * deterministic Snowflake scoring on each candidate.
  */
 export async function fetchSecUniverse(limit = 500): Promise<UniverseEntry[]> {
-  return getUniverseCache<UniverseEntry[]>().getOrSet(`sec-universe:${limit}`, async () => {
+  return getOrSetNonEmpty(getUniverseCache<UniverseEntry[]>(), `sec-universe:${limit}`, async () => {
     try {
       const res = await fetch("https://www.sec.gov/files/company_tickers.json", {
         headers: { "User-Agent": SEC_USER_AGENT },
@@ -66,7 +90,7 @@ export async function fetchSecUniverse(limit = 500): Promise<UniverseEntry[]> {
 // all its data and any later `.get()` on it throws "not a function").
 // Confirmed live during the Redis migration.
 async function fetchCikMap(): Promise<Record<string, string>> {
-  return getUniverseCache<Record<string, string>>().getOrSet("sec-cik-map", async () => {
+  return getOrSetNonEmpty(getUniverseCache<Record<string, string>>(), "sec-cik-map", async () => {
     try {
       const res = await fetch("https://www.sec.gov/files/company_tickers.json", {
         headers: { "User-Agent": SEC_USER_AGENT },
@@ -92,7 +116,7 @@ export async function fetchCikForSymbol(symbol: string): Promise<string | null> 
 }
 
 async function fetchFullNamedUniverse(): Promise<UniverseEntry[]> {
-  return getUniverseCache<UniverseEntry[]>().getOrSet("sec-universe:full", async () => {
+  return getOrSetNonEmpty(getUniverseCache<UniverseEntry[]>(), "sec-universe:full", async () => {
     try {
       const res = await fetch("https://www.sec.gov/files/company_tickers.json", {
         headers: { "User-Agent": SEC_USER_AGENT },
@@ -165,7 +189,7 @@ export async function searchSecUniverseByName(query: string): Promise<UniverseEn
 // Plain object, same reasoning as fetchCikMap above — a Map doesn't survive
 // the Redis JSON round-trip.
 async function fetchTickerByCikMap(): Promise<Record<string, string>> {
-  return getUniverseCache<Record<string, string>>().getOrSet("sec-ticker-by-cik-map", async () => {
+  return getOrSetNonEmpty(getUniverseCache<Record<string, string>>(), "sec-ticker-by-cik-map", async () => {
     try {
       const res = await fetch("https://www.sec.gov/files/company_tickers.json", {
         headers: { "User-Agent": SEC_USER_AGENT },
@@ -248,6 +272,12 @@ export async function fetchSicCode(symbol: string): Promise<SicClassification | 
   return getUniverseCache<SicClassification | null>().getOrSet(`sic:${symbol.toUpperCase()}`, async () => {
     const cik = await fetchCikForSymbol(symbol);
     if (!cik) return null;
+    // Proactive self-throttle — see rate-limit.ts. This and
+    // fetchInsiderActivity (insider.ts) are the two real per-candidate
+    // data.sec.gov hits during Stage 3 enrichment, and the documented
+    // cause of the live rate-limit trip this session (SEMIFINALIST_COUNT
+    // widening to 18 caused 2+ minute hangs from SEC's own 429s).
+    if (!(await withinSecEdgarBudget())) return null;
     try {
       // No Next.js fetch-cache hint — large filers' submissions.json can run
       // several MB, past Next's 2MB fetch-cache ceiling (confirmed live);

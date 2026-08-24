@@ -24,6 +24,16 @@ export const redis = new Redis({
 });
 
 class TtlCache<T> {
+  // In-flight request coalescing (single-flight) — per-process, not shared
+  // across serverless instances the way the Redis cache itself is, but it
+  // catches the common real case: N concurrent requests to the SAME warm
+  // instance during a cache miss (e.g. 10 people asking "best pick" at once
+  // right after the 4h screener cache expired) previously each ran their
+  // own full scan independently. Now the first caller's promise is shared
+  // with every concurrent caller for the same key instead of each paying
+  // for a duplicate scan.
+  private inFlight = new Map<string, Promise<T>>();
+
   constructor(
     private namespace: string,
     private ttlMs: number
@@ -57,9 +67,21 @@ class TtlCache<T> {
   async getOrSet(key: string, fn: () => Promise<T>): Promise<T> {
     const cached = await this.get(key);
     if (cached !== undefined) return cached;
-    const value = await fn();
-    await this.set(key, value);
-    return value;
+
+    const existing = this.inFlight.get(key);
+    if (existing) return existing;
+
+    const promise = (async () => {
+      try {
+        const value = await fn();
+        await this.set(key, value);
+        return value;
+      } finally {
+        this.inFlight.delete(key);
+      }
+    })();
+    this.inFlight.set(key, promise);
+    return promise;
   }
 }
 

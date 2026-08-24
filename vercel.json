@@ -3,6 +3,10 @@
     {
       "path": "/api/track-record/evaluate",
       "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/cron/prewarm",
+      "schedule": "0 10 * * *"
     }
   ]
 }

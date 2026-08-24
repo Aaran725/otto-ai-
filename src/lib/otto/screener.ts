@@ -381,7 +381,7 @@ interface SymbolSnapshot {
  * time (see getSymbolScoreCache). Intent-specific ranking (compositeScore,
  * keyStat) is derived from this shared snapshot per-screen, not cached here.
  */
-async function getSymbolSnapshot(symbol: string): Promise<SymbolSnapshot | null> {
+export async function getSymbolSnapshot(symbol: string): Promise<SymbolSnapshot | null> {
   return getSymbolScoreCache<SymbolSnapshot | null>().getOrSet(symbol, async () => {
     const bundle = await buildFinnhubBundle(symbol);
     if (!bundle) return null;

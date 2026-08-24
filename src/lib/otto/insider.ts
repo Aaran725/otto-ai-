@@ -1,6 +1,7 @@
 import { fetchCikForSymbol } from "./sec-universe";
 import { getInsiderCache } from "./cache";
 import { mapWithConcurrency } from "./batch";
+import { withinSecEdgarBudget } from "./rate-limit";
 
 const SEC_USER_AGENT = process.env.SEC_USER_AGENT ?? "Otto AI research@ottoai.app";
 const WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
@@ -97,6 +98,11 @@ export async function fetchInsiderActivity(symbol: string): Promise<InsiderActiv
   return getInsiderCache<InsiderActivity | null>().getOrSet(symbol.toUpperCase(), async () => {
     const cik = await fetchCikForSymbol(symbol);
     if (!cik) return null;
+
+    // Proactive self-throttle — see rate-limit.ts. Skipped the same way a
+    // failed fetch already is (return null, caller degrades gracefully)
+    // rather than blocking the request with a retry/backoff loop.
+    if (!(await withinSecEdgarBudget())) return null;
 
     const submissions = await fetchJson<SecSubmissionsResponse>(`https://data.sec.gov/submissions/CIK${cik}.json`);
     const recent = submissions?.filings?.recent;
