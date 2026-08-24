@@ -22,6 +22,7 @@ import type { ProgressFn } from "./chat-types";
 import type { ScreenQueryRequirements } from "./screen-query";
 import { computeValueScore } from "./value-score";
 import { computeForecastTargets } from "./forecast";
+import { logScreenerCall } from "./screener-track-record";
 
 export type ScreenIntent = "undervalued" | "momentum" | "best" | "quality" | "avoid";
 
@@ -992,6 +993,25 @@ export async function runScreener(
       ...c,
       compositeScore: Math.max(0, Math.min(100, Math.round(rankKey(c)))),
     }));
+
+    // Permanent track-record log — deliberately placed here, inside the
+    // cached getOrSet callback, not in the API route that calls
+    // runScreener. This block only runs on a genuine cache MISS (a real
+    // fresh scan); the route runs on every request, including cache hits
+    // when someone re-asks "best pick" while the 4h cache is still warm.
+    // Logging at the route level would re-log the same scan's output
+    // repeatedly — logScreenerCall's own 30-day cooldown is the second,
+    // independent guard against that, but this placement is what makes a
+    // logged entry correspond to an actual new recommendation event at all.
+    for (const c of finalists) {
+      void logScreenerCall({
+        intent,
+        symbol: c.symbol,
+        companyName: c.companyName,
+        price: c.price,
+        compositeScore: c.compositeScore,
+      });
+    }
 
     // Stage 4: only the actual final 5 get a real 10-K excerpt — purely
     // presentational (doesn't affect ranking, unlike the insider check),
