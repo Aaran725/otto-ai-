@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
-import { evaluateDueScreenerCalls } from "@/lib/otto/screener-track-record";
+import { evaluateDueScreenerCalls, updateDailyPeaks } from "@/lib/otto/screener-track-record";
 
 /**
- * Cron target (see vercel.json) — daily sweep that evaluates any logged
- * screener call that just crossed its 30/90/180-day mark, computing real
- * realized alpha vs SPY and writing it back permanently. Idempotent, so a
- * missed or retried run never double-counts anything already evaluated.
+ * Cron target (see vercel.json) — daily sweep that (1) evaluates any
+ * logged screener call that just crossed its 30/90/180-day mark, computing
+ * real realized alpha vs SPY, and (2) checks today's real price against
+ * every active call's peak and raises it if today's a new high. Both are
+ * idempotent — a missed or retried run never double-counts or lowers
+ * anything already recorded.
  *
  * Gated behind CRON_SECRET when set, matching Vercel's own convention:
  * when the env var is present, Vercel's Cron scheduler automatically sends
@@ -24,6 +26,6 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Not authorized" }, { status: 401 });
     }
   }
-  const result = await evaluateDueScreenerCalls();
-  return NextResponse.json(result);
+  const [evaluation, peaks] = await Promise.all([evaluateDueScreenerCalls(), updateDailyPeaks()]);
+  return NextResponse.json({ evaluation, peaks });
 }

@@ -42,8 +42,16 @@ export interface ScreenerCallRecord {
   priceAtCall: number;
   compositeScore: number;
   calledAt: string; // ISO timestamp
+  peakPrice: number; // highest real daily price seen since calledAt (starts equal to priceAtCall)
+  peakAt: string; // ISO timestamp of when peakPrice was set
   evaluations: Partial<Record<`d${Milestone}`, ScreenerCallEvaluation>>;
 }
+
+// How long the daily peak sweep keeps checking a call — a bit past the
+// final 180-day milestone, then it stops: the track record's real judgment
+// happens at the milestones, peak is a supplementary "how high did it get"
+// figure, not something worth polling forever.
+const PEAK_TRACKING_WINDOW_DAYS = 200;
 
 const recordKey = (id: string) => `${NAMESPACE}:call:${id}`;
 const cooldownKey = (intent: ScreenIntent, symbol: string) => `${NAMESPACE}:cooldown:${intent}:${symbol}`;
@@ -72,6 +80,7 @@ export async function logScreenerCall(params: {
 
     const now = Date.now();
     const id = `${params.intent}:${params.symbol}:${now}`;
+    const nowIso = new Date(now).toISOString();
     const record: ScreenerCallRecord = {
       id,
       intent: params.intent,
@@ -79,7 +88,9 @@ export async function logScreenerCall(params: {
       companyName: params.companyName,
       priceAtCall: params.price,
       compositeScore: params.compositeScore,
-      calledAt: new Date(now).toISOString(),
+      calledAt: nowIso,
+      peakPrice: params.price,
+      peakAt: nowIso,
       evaluations: {},
     };
     await Promise.all([
@@ -179,6 +190,41 @@ export async function getScreenerCallsWithLiveMarks(): Promise<ScreenerCallWithL
       };
     })
   );
+}
+
+/**
+ * Daily peak update — checks today's real price for every call still
+ * within the tracking window and raises peakPrice/peakAt if today's price
+ * is a new high since the call was made. This is a real, daily-granularity
+ * high-water mark (not a continuous intraday peak — the cron only runs
+ * once a day), so it can miss an intraday spike that fully reverted before
+ * the next sweep, but it correctly captures any peak that held through at
+ * least one daily check. Never lowers peakPrice — a peak, once real, stays
+ * on the record even after the price comes back down.
+ */
+export async function updateDailyPeaks(): Promise<{ updated: number; checked: number }> {
+  const calls = await getAllScreenerCalls();
+  const now = Date.now();
+  const active = calls.filter((c) => (now - new Date(c.calledAt).getTime()) / MS_PER_DAY <= PEAK_TRACKING_WINDOW_DAYS);
+  if (active.length === 0) return { updated: 0, checked: calls.length };
+
+  let updated = 0;
+  for (const call of active) {
+    try {
+      const quote = await fetchFinnhubQuote(call.symbol).catch(() => null);
+      const currentPrice = quote?.price ?? null;
+      if (currentPrice === null || currentPrice <= call.peakPrice) continue;
+      await redis.set(recordKey(call.id), {
+        ...call,
+        peakPrice: currentPrice,
+        peakAt: new Date(now).toISOString(),
+      });
+      updated += 1;
+    } catch {
+      // one bad symbol shouldn't sink the whole sweep
+    }
+  }
+  return { updated, checked: active.length };
 }
 
 /**
