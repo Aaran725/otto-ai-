@@ -2,6 +2,7 @@ import Groq from "groq-sdk";
 import { OTTO_SYSTEM_PROMPT, buildOttoUserPrompt } from "./system-prompt";
 import type { GroqOttoResponse, OttoAnalysis, OttoSnowflake, StreetConsensus, DataQuality } from "./schema";
 import { getCachedScreenerSnapshot } from "./screener";
+import { recordEvent } from "./observability";
 import { getAnalysisCache } from "./cache";
 import { computeSnowflake, type OttoSnowflakeScores } from "./snowflake";
 import { computeForecastTargets } from "./forecast";
@@ -171,7 +172,7 @@ export async function runOttoAnalysis(
   const cacheKey = `${ticker}:${new Date().toISOString().slice(0, 10)}`;
   const cache = getAnalysisCache<OttoAnalysis>();
 
-  const cached = cache.get(cacheKey);
+  const cached = await cache.get(cacheKey);
   if (cached) return cached; // cache hit: genuinely instant, no stages to report
 
   const analysis = await buildOttoAnalysis(ticker, bundle, onProgress);
@@ -211,8 +212,11 @@ const RECONCILIATION_THRESHOLD = 15;
  * getCachedScreenerSnapshot) and the gap is large enough to need
  * explaining, not just labeling.
  */
-function buildReconciliationNote(ticker: string, convictionScore: number, analysisSf: OttoSnowflakeScores): string | null {
-  const screenerSnap = getCachedScreenerSnapshot(ticker);
+function buildReconciliationNoteFromSnapshot(
+  screenerSnap: { compositeScore: number; sf: OttoSnowflakeScores } | null,
+  convictionScore: number,
+  analysisSf: OttoSnowflakeScores
+): string | null {
   if (!screenerSnap) return null;
 
   const rounded = Math.round(convictionScore);
@@ -421,19 +425,26 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       dataQuality === "insufficient"
         ? `Not enough real financial data available for ${ticker} right now — treat any score as unreliable and verify independently.`
         : base.oneLiner;
-    const reconciliationNote = buildReconciliationNote(ticker, base.convictionScore, snowflakeScores);
+    // Fetched once and reused for both the reconciliation note and the
+    // divergence metric below, rather than two separate cache round-trips.
+    const screenerSnap = await getCachedScreenerSnapshot(ticker);
+    const reconciliationNote = buildReconciliationNoteFromSnapshot(screenerSnap, base.convictionScore, snowflakeScores);
 
-    // Phase 1 item 3: passive server-side signal for how often the two
-    // pipelines actually disagree by a lot — no analytics service wired up
-    // yet, so this is a plain server log for now. If this fires rarely,
-    // the existing disclaimer is sufficient; if it's common, the screener
-    // and single-stock scoring need to converge, not just be labeled
-    // differently.
-    const cachedScreenerScore = getCachedScreenerSnapshot(ticker)?.compositeScore;
-    if (cachedScreenerScore !== undefined && Math.abs(Math.round(base.convictionScore) - cachedScreenerScore) > 25) {
-      console.warn(
-        `[score-divergence] ${ticker}: screen=${cachedScreenerScore} conviction=${Math.round(base.convictionScore)}`
-      );
+    if (dataQuality === "insufficient") {
+      recordEvent("data_quality_insufficient", { ticker });
+    }
+
+    // Phase 1 item 3 / Phase 3 item 2: passive server-side signal for how
+    // often the two pipelines actually disagree by a lot. If this fires
+    // rarely, the existing disclaimer is sufficient; if it's common, the
+    // screener and single-stock scoring need to converge, not just be
+    // labeled differently.
+    if (screenerSnap && Math.abs(Math.round(base.convictionScore) - screenerSnap.compositeScore) > 25) {
+      recordEvent("score_divergence", {
+        ticker,
+        screenScore: screenerSnap.compositeScore,
+        convictionScore: Math.round(base.convictionScore),
+      });
     }
 
     return {

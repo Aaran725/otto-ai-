@@ -60,30 +60,35 @@ export async function fetchSecUniverse(limit = 500): Promise<UniverseEntry[]> {
  * for an insider-activity lookup shouldn't be missing just because it fell
  * outside the mega-cap-weighted screener sample.
  */
-async function fetchCikMap(): Promise<Map<string, string>> {
-  return getUniverseCache<Map<string, string>>().getOrSet("sec-cik-map", async () => {
+// A plain object, not a Map — the cache is now Redis-backed (JSON over the
+// wire), and a Map doesn't survive a JSON round-trip (it serializes to "{}"
+// and deserializes as a plain object anyway, so a cached Map silently loses
+// all its data and any later `.get()` on it throws "not a function").
+// Confirmed live during the Redis migration.
+async function fetchCikMap(): Promise<Record<string, string>> {
+  return getUniverseCache<Record<string, string>>().getOrSet("sec-cik-map", async () => {
     try {
       const res = await fetch("https://www.sec.gov/files/company_tickers.json", {
         headers: { "User-Agent": SEC_USER_AGENT },
         next: { revalidate: 86400 },
       });
-      if (!res.ok) return new Map();
+      if (!res.ok) return {};
 
       const data = (await res.json()) as Record<string, SecTickerEntry>;
-      const map = new Map<string, string>();
+      const map: Record<string, string> = {};
       for (const entry of Object.values(data)) {
-        map.set(entry.ticker.toUpperCase(), String(entry.cik_str).padStart(10, "0"));
+        map[entry.ticker.toUpperCase()] = String(entry.cik_str).padStart(10, "0");
       }
       return map;
     } catch {
-      return new Map();
+      return {};
     }
   });
 }
 
 export async function fetchCikForSymbol(symbol: string): Promise<string | null> {
   const map = await fetchCikMap();
-  return map.get(symbol.toUpperCase()) ?? null;
+  return map[symbol.toUpperCase()] ?? null;
 }
 
 async function fetchFullNamedUniverse(): Promise<UniverseEntry[]> {
@@ -157,29 +162,31 @@ export async function searchSecUniverseByName(query: string): Promise<UniverseEn
   return bestScore > 0 && queryWords.some((w) => w.length >= 4) ? best : null;
 }
 
-async function fetchTickerByCikMap(): Promise<Map<string, string>> {
-  return getUniverseCache<Map<string, string>>().getOrSet("sec-ticker-by-cik-map", async () => {
+// Plain object, same reasoning as fetchCikMap above — a Map doesn't survive
+// the Redis JSON round-trip.
+async function fetchTickerByCikMap(): Promise<Record<string, string>> {
+  return getUniverseCache<Record<string, string>>().getOrSet("sec-ticker-by-cik-map", async () => {
     try {
       const res = await fetch("https://www.sec.gov/files/company_tickers.json", {
         headers: { "User-Agent": SEC_USER_AGENT },
         next: { revalidate: 86400 },
       });
-      if (!res.ok) return new Map();
+      if (!res.ok) return {};
       const data = (await res.json()) as Record<string, SecTickerEntry>;
-      const map = new Map<string, string>();
+      const map: Record<string, string> = {};
       for (const entry of Object.values(data)) {
-        map.set(String(entry.cik_str).padStart(10, "0"), entry.ticker);
+        map[String(entry.cik_str).padStart(10, "0")] = entry.ticker;
       }
       return map;
     } catch {
-      return new Map();
+      return {};
     }
   });
 }
 
 export async function fetchTickerForCik(cik: string): Promise<string | null> {
   const map = await fetchTickerByCikMap();
-  return map.get(cik.padStart(10, "0")) ?? null;
+  return map[cik.padStart(10, "0")] ?? null;
 }
 
 /**

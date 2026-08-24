@@ -4,6 +4,7 @@ import { resolveExplicitTicker, resolveTickerByFuzzyName, type ResolvedTicker } 
 import { looksLikeFreshRequest, detectFollowUpTopic, buildFollowUpVisual } from "@/lib/otto/followup-intent";
 import { detectScreenIntent, detectThemeFilter, detectCapFilter, intentLabel, runScreener, type CapFilter } from "@/lib/otto/screener";
 import { interpretScreenQuery, themeQueryToFilter, verifySeedTickers } from "@/lib/otto/screen-query";
+import { recordEvent } from "@/lib/otto/observability";
 import type { ChatRequestBody, ChatStreamEvent, ProgressFn } from "@/lib/otto/chat-types";
 
 /**
@@ -125,6 +126,7 @@ export async function POST(request: Request) {
               requireInsiderBuying
             );
             if (results.length === 0) {
+              recordEvent("screener_zero_results", { intent: screenIntent, theme: theme?.key, capFilter: capFilter?.key });
               const reply =
                 requirements || requireInsiderBuying
                   ? "Screened the market, but nothing currently trading meets all of those requirements together — try loosening one (a lower growth bar, a higher P/E ceiling, or dropping the insider-buying requirement)."

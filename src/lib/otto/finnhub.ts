@@ -1,5 +1,6 @@
 import type { FmpRatios, FmpKeyMetrics, FmpIncomeStatement, FmpCashFlowStatement } from "./fmp";
 import { getFinnhubFundamentalsCache } from "./cache";
+import { recordEvent } from "./observability";
 
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
 
@@ -69,6 +70,7 @@ async function finnhubGet<T>(path: string): Promise<T | null> {
       continue;
     }
   }
+  recordEvent("finnhub_exhausted", { path });
   return null; // every key failed
 }
 
@@ -97,10 +99,10 @@ type FinnhubFundamentals = { ratios: FmpRatios; keyMetrics: FmpKeyMetrics; week5
  */
 export async function fetchFinnhubFundamentals(symbol: string): Promise<FinnhubFundamentals | null> {
   const cache = getFinnhubFundamentalsCache<FinnhubFundamentals>();
-  const cached = cache.get(symbol.toUpperCase());
+  const cached = await cache.get(symbol.toUpperCase());
   if (cached) return cached;
   const result = await fetchFinnhubFundamentalsUncached(symbol);
-  if (result) cache.set(symbol.toUpperCase(), result);
+  if (result) await cache.set(symbol.toUpperCase(), result);
   return result;
 }
 

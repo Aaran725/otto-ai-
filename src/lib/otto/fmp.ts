@@ -4,6 +4,7 @@ import { fetchYahooHistoricalMonthly } from "./yahoo";
 import { fetchAlpacaSnapshot, fetchAlpacaHistoricalMonthly } from "./alpaca";
 import { fetchCikForSymbol } from "./sec-universe";
 import type { ProgressFn } from "./chat-types";
+import { recordEvent } from "./observability";
 
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 
@@ -282,7 +283,7 @@ export async function fetchStockBundle(ticker: string, onProgress?: ProgressFn):
   const symbol = ticker.toUpperCase();
   const cache = getFmpCache<StockBundle>();
 
-  const cached = cache.get(symbol);
+  const cached = await cache.get(symbol);
   if (cached) return cached; // cache hit: genuinely instant, no stages to report
 
   onProgress?.({ id: "market-data", text: `Pulling market data for ${symbol}…`, icon: "fmp", tracksFinding: true });
@@ -306,6 +307,14 @@ export async function fetchStockBundle(ticker: string, onProgress?: ProgressFn):
     bundle.historicalMonthly.length === 0 ||
     bundle.income.length === 0 ||
     (bundle.ratios === null && bundle.keyMetrics === null);
+  if (isPartial) {
+    recordEvent("fmp_bundle_partial", {
+      symbol,
+      missingHistory: bundle.historicalMonthly.length === 0,
+      missingIncome: bundle.income.length === 0,
+      missingFundamentals: bundle.ratios === null && bundle.keyMetrics === null,
+    });
+  }
   cache.set(symbol, bundle, isPartial ? PARTIAL_BUNDLE_TTL_MS : undefined);
   return bundle;
 }
