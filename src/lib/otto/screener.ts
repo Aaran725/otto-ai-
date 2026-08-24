@@ -770,10 +770,9 @@ export async function runScreener(
     const sectorPercentileBySymbol = new Map<string, number>();
     const earningsBySymbol = new Map<string, EarningsRecord>();
     const shortInterestBySymbol = new Map<string, ShortInterestData>();
-    const industryBySymbol = new Map<string, string | null>();
 
     const withInsider = await mapWithConcurrency(semifinalists, 4, async (candidate) => {
-      const [activity, trend, fundamentals, financialsTrend, snap, priceTarget, earnings, shortInterest, profile] = await Promise.all([
+      const [activity, trend, fundamentals, financialsTrend, snap, priceTarget, earnings, shortInterest] = await Promise.all([
         fetchInsiderActivity(candidate.symbol).catch(() => null),
         fetchFinnhubRatingTrend(candidate.symbol).catch(() => null),
         fetchFinnhubFundamentals(candidate.symbol).catch(() => null),
@@ -798,14 +797,10 @@ export async function runScreener(
         // Real FINRA short-interest data, same reuse — high/rising short
         // interest is a genuine risk flag regardless of screen intent.
         fetchShortInterest(candidate.symbol).catch(() => null),
-        // Real industry classification for the sector-diversification pass
-        // below — cheap, already used for theme/cap classification earlier.
-        fetchFinnhubProfile2(candidate.symbol).catch(() => null),
       ]);
       if (trend) ratingTrendBySymbol.set(candidate.symbol, trend);
       if (earnings) earningsBySymbol.set(candidate.symbol, earnings);
       if (shortInterest) shortInterestBySymbol.set(candidate.symbol, shortInterest);
-      industryBySymbol.set(candidate.symbol, profile?.industry ?? null);
       const pe = fundamentals?.ratios?.priceToEarningsRatio;
       if (pe !== undefined) {
         const peerValuation = await fetchPeerValuation(candidate.symbol, pe).catch(() => null);
@@ -1090,35 +1085,18 @@ export async function runScreener(
       return true;
     }
 
-    // Sector diversification: a real desk wouldn't hand back 5 correlated
-    // mega-cap tech names just because they all scored well on the same
-    // axis. Greedy pass through the rank-sorted list, capping how many
-    // picks share one Finnhub industry classification — a skipped candidate
-    // still gets backfilled if the cap leaves the final list short, since a
-    // real pick always beats an empty slot.
-    const SECTOR_CAP = 2;
-    function selectDiversified(sorted: ScreenerCandidate[], limit: number): ScreenerCandidate[] {
-      const selected: ScreenerCandidate[] = [];
-      const sectorCounts = new Map<string, number>();
-      const skipped: ScreenerCandidate[] = [];
-      for (const c of sorted) {
-        if (selected.length >= limit) break;
-        const sector = industryBySymbol.get(c.symbol) ?? null;
-        const count = sector ? (sectorCounts.get(sector) ?? 0) : 0;
-        if (sector && count >= SECTOR_CAP) {
-          skipped.push(c);
-          continue;
-        }
-        selected.push(c);
-        if (sector) sectorCounts.set(sector, count + 1);
-      }
-      for (const c of skipped) {
-        if (selected.length >= limit) break;
-        selected.push(c);
-      }
-      return selected;
-    }
-
+    // Deliberately NOT sector-diversified anymore — this used to cap how
+    // many picks could share one Finnhub industry classification, on the
+    // theory that a real desk wouldn't hand back 5 correlated mega-cap tech
+    // names. Removed: if the real top 5 by conviction genuinely converge on
+    // one sector because that's where the real signal is right now, forcing
+    // artificial spread to look diversified is optimizing for the
+    // appearance of prudence over the actual ranking — diversification is a
+    // choice a user should make on top of real picks, not one silently
+    // baked into which picks they even see. The industry-classification
+    // fetch that only existed to support this cap (fetchFinnhubProfile2 per
+    // semifinalist) was removed too — no reason to keep paying for data
+    // nothing reads anymore.
     let finalists: ScreenerCandidate[];
     if (intent === "contrarian") {
       // "Otto vs. Wall Street" asks a fundamentally different question
@@ -1138,11 +1116,8 @@ export async function runScreener(
         .filter((x) => Math.abs(x.divergence) >= MIN_DIVERGENCE)
         .sort((a, b) => Math.abs(b.divergence) - Math.abs(a.divergence));
       const divergenceBySymbol = new Map(withDivergence.map((x) => [x.c.symbol, x.divergence]));
-      const diversified = selectDiversified(
-        withDivergence.map((x) => x.c),
-        5
-      );
-      finalists = diversified.map((c) => {
+      const topByDivergence = withDivergence.slice(0, 5).map((x) => x.c);
+      finalists = topByDivergence.map((c) => {
         const divergence = divergenceBySymbol.get(c.symbol)!;
         const direction = divergence > 0 ? "more bullish than" : "more bearish than";
         const whyBreakdown = buildWhyBreakdown(c, c.compositeScore);
@@ -1160,10 +1135,7 @@ export async function runScreener(
           if (a.thinCoverage !== b.thinCoverage) return a.thinCoverage ? 1 : -1;
           return ascending ? rankKey(a) - rankKey(b) : rankKey(b) - rankKey(a);
         });
-      // "avoid" isn't a picks list — if a sector genuinely has the most red
-      // flags, showing more than 2 from it is the honest answer, not a flaw
-      // to correct for.
-      const selectedFinalists = intent === "avoid" ? rankedFinalists.slice(0, 5) : selectDiversified(rankedFinalists, 5);
+      const selectedFinalists = rankedFinalists.slice(0, 5);
       // The displayed score must reflect the same real signals used to rank —
       // otherwise a stock can visibly carry an "insiders selling" flag while
       // still showing a 100/100 screen score, which reads as a contradiction
@@ -1191,8 +1163,19 @@ export async function runScreener(
     // repeatedly — logScreenerCall's own 30-day cooldown is the second,
     // independent guard against that, but this placement is what makes a
     // logged entry correspond to an actual new recommendation event at all.
+    //
+    // Awaited sequentially, NOT fire-and-forget, and specifically in rank
+    // order (finalists is already sorted) — logScreenerCall now allocates
+    // real simulated dollars from a shared cash pool, so the highest-
+    // conviction pick of the batch must claim its stake before the next
+    // one checks what's left. Firing all 5 concurrently would race on the
+    // same cash read, risking two picks both seeing the same "available"
+    // balance and over-allocating it. The added latency (a handful of
+    // sequential Redis round-trips) is small next to the rest of the scan
+    // and still never blocks or fails the real response — logScreenerCall
+    // catches its own errors internally.
     for (const c of finalists) {
-      void logScreenerCall({
+      await logScreenerCall({
         intent,
         symbol: c.symbol,
         companyName: c.companyName,

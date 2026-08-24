@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getScreenerCallsWithLiveMarks } from "@/lib/otto/screener-track-record";
+import { getScreenerCallsWithLiveMarks, getPortfolioSummary } from "@/lib/otto/screener-track-record";
 
 export const metadata = { title: "Screener Track Record (private) — Otto AI" };
 export const dynamic = "force-dynamic";
@@ -24,6 +24,10 @@ function fmtDate(iso: string) {
   return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+function fmtDollars(n: number) {
+  return `$${n.toLocaleString("en-US")}`;
+}
+
 export default async function ScreenerTrackRecordPage({
   searchParams,
 }: {
@@ -39,7 +43,7 @@ export default async function ScreenerTrackRecordPage({
     );
   }
 
-  const calls = await getScreenerCallsWithLiveMarks();
+  const [calls, portfolio] = await Promise.all([getScreenerCallsWithLiveMarks(), getPortfolioSummary()]);
   calls.sort((a, b) => new Date(b.calledAt).getTime() - new Date(a.calledAt).getTime());
 
   return (
@@ -50,6 +54,38 @@ export default async function ScreenerTrackRecordPage({
       <h1 className="otto-text-display mt-6">Screener Track Record</h1>
       <p className="otto-text-caption mt-2 text-otto-text-faint">
         Private — every real screener pick Otto has made, unedited. {calls.length} logged.
+      </p>
+
+      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
+        <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-3">
+          <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">Portfolio value</div>
+          <div className="tabular-nums text-lg font-semibold text-otto-text">{fmtDollars(portfolio.totalValue)}</div>
+        </div>
+        <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-3">
+          <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">Total return</div>
+          <div className={`tabular-nums text-lg font-semibold ${portfolio.totalReturnPct >= 0 ? "text-otto-bull" : "text-otto-bear"}`}>
+            {fmtPct(portfolio.totalReturnPct)}
+          </div>
+        </div>
+        <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-3">
+          <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">Cash available</div>
+          <div className="tabular-nums text-lg font-semibold text-otto-text">{fmtDollars(portfolio.cashAvailable)}</div>
+        </div>
+        <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-3">
+          <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">Open positions</div>
+          <div className="tabular-nums text-lg font-semibold text-otto-text">
+            {portfolio.openPositionCount} · {fmtDollars(portfolio.openPositionsValue)}
+          </div>
+        </div>
+        <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-3">
+          <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">Started</div>
+          <div className="text-lg font-semibold text-otto-text">{fmtDate(portfolio.startedAt)}</div>
+        </div>
+      </div>
+      <p className="otto-text-caption mt-2 text-otto-text-faint">
+        A real ${portfolio.startingCash.toLocaleString("en-US")} simulated stake, sized by conviction (4-12% per pick) and
+        allocated in the order picks were made — not a promise about real trading, a real accounting of what this specific
+        rule set would be worth today.
       </p>
 
       {calls.length === 0 ? (
@@ -65,6 +101,7 @@ export default async function ScreenerTrackRecordPage({
                 <th className="px-4 py-3 font-medium">Intent</th>
                 <th className="px-4 py-3 font-medium">Called</th>
                 <th className="px-4 py-3 font-medium">Price found</th>
+                <th className="px-4 py-3 font-medium">Allocated</th>
                 <th className="px-4 py-3 font-medium">Peak since</th>
                 <th className="px-4 py-3 font-medium">Current</th>
                 <th className="px-4 py-3 font-medium">Alpha vs SPY (live)</th>
@@ -83,6 +120,10 @@ export default async function ScreenerTrackRecordPage({
                   <td className="px-4 py-3 capitalize text-otto-text-muted">{c.intent}</td>
                   <td className="px-4 py-3 text-otto-text-muted">{fmtDate(c.calledAt)}</td>
                   <td className="px-4 py-3">{fmtPrice(c.priceAtCall)}</td>
+                  <td className="px-4 py-3">
+                    {fmtDollars(c.allocatedAmount)}
+                    {c.closed && <span className="otto-text-caption ml-1 text-otto-text-faint">(closed)</span>}
+                  </td>
                   <td className="px-4 py-3">
                     {fmtPrice(c.peakPrice)}
                     <span className="otto-text-caption ml-1 text-otto-text-faint">({fmtDate(c.peakAt)})</span>
