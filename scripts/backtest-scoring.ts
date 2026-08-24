@@ -35,10 +35,8 @@
  *
  * The real forward-looking validation (does a screener pick actually beat
  * SPY over the following months) can only come from letting time pass on
- * real, timestamped picks — that's what TrackRecordPanel already does for
- * single-stock analysis calls; extending that same logging to screener
- * picks is the honest next step once this diagnostic doesn't flag anything
- * structurally broken.
+ * real, timestamped picks — see screener-track-record.ts, which now logs
+ * every real pick permanently for exactly that purpose.
  */
 import { fetchSecUniverse } from "../src/lib/otto/sec-universe";
 import { computeSnowflake } from "../src/lib/otto/snowflake";
@@ -118,6 +116,36 @@ function quintileReport(pairs: { score: number; trailingReturn: number }[]): str
   return lines.join("\n");
 }
 
+// What a real screen actually shows is the extreme top (or, for "avoid",
+// bottom) ~10 names by score — not the average of a 38-wide quintile. A
+// quintile average can look fine while the literal handful of names a user
+// would actually see is a mess (or vice versa), so this is the number that
+// matters most for real product behavior, reported alongside the
+// correlation rather than instead of it.
+const EDGE_N = 10;
+function edgeReport(
+  intent: ScreenIntent,
+  pairs: { score: number; trailingReturn: number; symbol: string }[]
+): { avgReturn: number; names: string } {
+  const ascending = ASCENDING_INTENTS.has(intent);
+  const sorted = [...pairs].sort((a, b) => (ascending ? a.score - b.score : b.score - a.score));
+  const edge = sorted.slice(0, EDGE_N);
+  const avgReturn = edge.reduce((a, b) => a + b.trailingReturn, 0) / edge.length;
+  const names = edge.map((e) => `${e.symbol}(${e.trailingReturn >= 0 ? "+" : ""}${e.trailingReturn.toFixed(0)}%)`).join(" ");
+  return { avgReturn, names };
+}
+
+// Hard gate per the Phase 0 plan: "avoid" must show real negative signal
+// and "momentum" must stay positive — checked on the literal edge-N number
+// (what the product actually surfaces), not just the correlation, which
+// can be noisy at this sample size. Fails loudly (non-zero exit) so a
+// future weight change that silently flips a sign gets caught here instead
+// of three months into a live track record.
+interface GateResult {
+  label: string;
+  passed: boolean;
+}
+
 async function main() {
   console.log(`Sampling ${SAMPLE_SIZE} real tickers from the SEC universe...`);
   const universe = await fetchSecUniverse(2000);
@@ -148,8 +176,9 @@ async function main() {
   console.log("SCORING WEIGHT SANITY CHECK — trailing 26-week return correlation");
   console.log("=".repeat(72));
 
+  const gates: GateResult[] = [];
   for (const intent of INTENTS) {
-    const pairs = valid.map((v) => ({ score: v.scoresByIntent[intent]!, trailingReturn: v.trailingReturn }));
+    const pairs = valid.map((v) => ({ score: v.scoresByIntent[intent]!, trailingReturn: v.trailingReturn, symbol: v.symbol }));
     const correlation = pearsonCorrelation(
       pairs.map((p) => p.score),
       pairs.map((p) => p.trailingReturn)
@@ -162,15 +191,34 @@ async function main() {
     console.log(`\n${intent.toUpperCase()} (n=${pairs.length}) — ${expected}`);
     console.log(`  Pearson r = ${correlation !== null ? correlation.toFixed(3) : "n/a (insufficient variance)"}`);
     console.log(quintileReport(pairs));
+
+    const edge = edgeReport(intent, pairs);
+    const edgeLabel = ASCENDING_INTENTS.has(intent)
+      ? `bottom ${EDGE_N} (what "avoid" actually shows)`
+      : `top ${EDGE_N} (what the screen actually shows)`;
+    console.log(`  ${edgeLabel}: avg trailing return ${edge.avgReturn >= 0 ? "+" : ""}${edge.avgReturn.toFixed(1)}%`);
+    console.log(`    ${edge.names}`);
+
+    if (intent === "avoid") gates.push({ label: "avoid: bottom-10 trailing return is negative", passed: edge.avgReturn < 0 });
+    if (intent === "momentum") gates.push({ label: "momentum: correlation is positive", passed: (correlation ?? 0) > 0 });
   }
+
   console.log(`\n${"=".repeat(72)}`);
+  console.log("GATE CHECK");
+  console.log("=".repeat(72));
+  let allPassed = true;
+  for (const gate of gates) {
+    console.log(`  ${gate.passed ? "PASS" : "FAIL"} — ${gate.label}`);
+    if (!gate.passed) allPassed = false;
+  }
   console.log(
-    "Reminder: this is a trailing-correlation sanity check, not a forward\n" +
+    "\nReminder: this is a trailing-correlation sanity check, not a forward\n" +
       "predictive backtest — free data tiers don't expose point-in-time\n" +
       "historical fundamentals. Treat a wildly wrong-signed correlation as a\n" +
       "real red flag; treat a clean signal here as 'not obviously broken,'\n" +
       "not as proof of forward alpha."
   );
+  if (!allPassed) process.exit(1);
 }
 
 main().catch((err) => {

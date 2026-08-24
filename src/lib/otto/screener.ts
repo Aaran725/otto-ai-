@@ -407,17 +407,24 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
 // factor research favors over value alone. "momentum" leans on momentum
 // and growth since price trend and revenue trend tend to move together.
 // "quality" doubles up quality+financialHealth (the two axes that most
-// directly answer "is this a well-run, durable business"). "best"/"avoid"
-// stay balanced across all five since they're asking a general question,
-// not screening for one specific factor.
+// directly answer "is this a well-run, durable business"). "best" stays
+// balanced across all five since it's asking a general question, not
+// screening for one specific factor.
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
   momentum: { momentum: 2, growth: 1.5, quality: 0.5, valuation: 0.3, financialHealth: 0.5 },
   best: { valuation: 1, growth: 1, quality: 1, financialHealth: 1, momentum: 1 },
   quality: { quality: 2, financialHealth: 2, valuation: 0.5, growth: 0.5, momentum: 0.3 },
-  // Same composite as "best" — the screen just sorts ascending instead of
-  // descending, surfacing the weakest overall scores rather than strongest.
-  avoid: { valuation: 1, growth: 1, quality: 1, financialHealth: 1, momentum: 1 },
+  // Deliberately NOT a mirror of "best" (it used to be, equally weighted
+  // across all five, sorted ascending) — that treated "what's weak" as the
+  // exact inverse of "what's strong," and the backtest caught it doing
+  // nothing (r=0.036, no real correlation to actual trailing weakness).
+  // A company trending toward real trouble shows it first in financial
+  // distress and negative price action — momentum reacts to bad news
+  // fastest, financialHealth catches deteriorating balance sheets — not
+  // necessarily in valuation or growth, which measure something closer to
+  // "is this a good business" than "is this actively getting worse."
+  avoid: { financialHealth: 2, momentum: 2, quality: 1, valuation: 0.5, growth: 0.5 },
 };
 
 export const ASCENDING_INTENTS = new Set<ScreenIntent>(["avoid"]);
@@ -473,8 +480,13 @@ export function scoreCandidate(intent: ScreenIntent, sf: OttoSnowflakeScores, we
 // same underlying ratios, zero extra cost) breaks those ties by real
 // magnitude instead of tie-break-nudge luck — weighted harder for
 // "undervalued" specifically, since "how cheap, really" is the entire
-// point of that screen.
-const VALUE_SCORE_BLEND: Partial<Record<ScreenIntent, number>> = { undervalued: 0.5, best: 0.45 };
+// point of that screen. "best"'s blend was originally 0.45 — nearly half
+// the composite — which the backtest caught behaving like a disguised
+// value screen (r=-0.191, tracking the same mean-reversion pattern as
+// undervalued instead of a balanced positive signal). Pulled back to
+// 0.2 so it still breaks ties by real cheapness without dominating the
+// axis-weighted composite it's supposed to be tie-breaking, not replacing.
+const VALUE_SCORE_BLEND: Partial<Record<ScreenIntent, number>> = { undervalued: 0.5, best: 0.2 };
 
 export function applyValueScoreBlend(intent: ScreenIntent, baseComposite: number, valueScore: number | null): number {
   const blend = VALUE_SCORE_BLEND[intent];
