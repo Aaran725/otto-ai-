@@ -1,4 +1,5 @@
 import type { FmpRatios, FmpKeyMetrics, FmpIncomeStatement, FmpCashFlowStatement } from "./fmp";
+import { getFinnhubFundamentalsCache } from "./cache";
 
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
 
@@ -32,6 +33,17 @@ async function finnhubRequest<T>(path: string, apiKey: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** A 4xx that isn't auth-related is almost certainly about the symbol or
+ * endpoint itself, not this specific key — every other key on the same
+ * free tier will fail identically, so retrying through the rest of the
+ * rotation would just waste calls for no chance of success. */
+function isSymbolLevelError(err: unknown): boolean {
+  if (!(err instanceof FinnhubApiError) || err.isRateLimit) return false;
+  const match = err.message.match(/\((\d\d\d)\)/);
+  const status = match ? Number(match[1]) : null;
+  return status !== null && status >= 400 && status < 500 && status !== 401 && status !== 403;
+}
+
 async function finnhubGet<T>(path: string): Promise<T | null> {
   const keys = getFinnhubKeys();
   if (keys.length === 0) return null;
@@ -44,11 +56,20 @@ async function finnhubGet<T>(path: string): Promise<T | null> {
       globalForFinnhubRotation.__ottoFinnhubKeyIndex = idx;
       return result;
     } catch (err) {
-      if (err instanceof FinnhubApiError && err.isRateLimit) continue;
-      return null; // non-rate-limit error: this is a best-effort source, fail soft
+      if (isSymbolLevelError(err)) return null;
+      // Rate limit, a key-specific auth error (401/403), a transient 5xx,
+      // or — critically — a raw network/timeout failure that never even
+      // reached the point of getting classified as a FinnhubApiError: all
+      // of these are about THIS request, not this ticker, so the next key
+      // in rotation has a real chance of succeeding. Previously any of
+      // these non-429 cases gave up immediately after the first key,
+      // which is exactly what let the single-stock analysis path silently
+      // fail for a ticker (confirmed live: AYI) that the screener's
+      // separate call for the same symbol succeeded on moments later.
+      continue;
     }
   }
-  return null; // every key rate-limited
+  return null; // every key failed
 }
 
 interface FinnhubMetricResponse {
@@ -62,9 +83,28 @@ interface FinnhubMetricResponse {
  * Ratio fields (P/E, P/B, P/S, current/quick ratio, D/E) are plain
  * multiples and need no conversion.
  */
-export async function fetchFinnhubFundamentals(
-  symbol: string
-): Promise<{ ratios: FmpRatios; keyMetrics: FmpKeyMetrics; week52High?: number; week52Low?: number } | null> {
+type FinnhubFundamentals = { ratios: FmpRatios; keyMetrics: FmpKeyMetrics; week52High?: number; week52Low?: number };
+
+/**
+ * Cached at the source, not per-caller, and only on success — a failed
+ * lookup is never cached (so the next caller gets a real retry, through
+ * the full key rotation, rather than being locked into someone else's
+ * transient failure). This is what lets the screener and a single-stock
+ * lookup share one real result for the same symbol: previously each path
+ * risked its own independent fetch failure even seconds apart (confirmed
+ * live: AYI's screener entry had real Finnhub data while its single-stock
+ * card, built moments later, didn't).
+ */
+export async function fetchFinnhubFundamentals(symbol: string): Promise<FinnhubFundamentals | null> {
+  const cache = getFinnhubFundamentalsCache<FinnhubFundamentals>();
+  const cached = cache.get(symbol.toUpperCase());
+  if (cached) return cached;
+  const result = await fetchFinnhubFundamentalsUncached(symbol);
+  if (result) cache.set(symbol.toUpperCase(), result);
+  return result;
+}
+
+async function fetchFinnhubFundamentalsUncached(symbol: string): Promise<FinnhubFundamentals | null> {
   const data = await finnhubGet<FinnhubMetricResponse>(`/stock/metric?symbol=${encodeURIComponent(symbol)}&metric=all`);
   const m = data?.metric;
   if (!m || Object.keys(m).length === 0) return null;

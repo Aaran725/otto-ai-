@@ -1,6 +1,6 @@
 import Groq from "groq-sdk";
 import { OTTO_SYSTEM_PROMPT, buildOttoUserPrompt } from "./system-prompt";
-import type { GroqOttoResponse, OttoAnalysis, OttoSnowflake, StreetConsensus } from "./schema";
+import type { GroqOttoResponse, OttoAnalysis, OttoSnowflake, StreetConsensus, DataQuality } from "./schema";
 import { getAnalysisCache } from "./cache";
 import { computeSnowflake, type OttoSnowflakeScores } from "./snowflake";
 import { computeForecastTargets } from "./forecast";
@@ -155,7 +155,12 @@ function mergeSnowflake(scores: OttoSnowflakeScores, notes: GroqOttoResponse["sn
   };
 }
 
-const PARTIAL_ANALYSIS_TTL_MS = 5 * 60 * 1000; // retry soon rather than staying broken for 24h
+// Shortened from 5 min — item 1 (retry through the full Finnhub key
+// rotation on any transient error) and item 3 (a shared fundamentals cache
+// between the screener and single-stock paths) should already make a
+// genuine failure much rarer, so whatever does still slip through deserves
+// a fast retry rather than staying broken for minutes.
+const PARTIAL_ANALYSIS_TTL_MS = 90 * 1000;
 
 export async function runOttoAnalysis(
   ticker: string,
@@ -170,11 +175,15 @@ export async function runOttoAnalysis(
 
   const analysis = await buildOttoAnalysis(ticker, bundle, onProgress);
 
-  // If the underlying bundle was missing price history or financials (a
-  // rate-limited fetch, not a real data gap), don't lock the broken result
-  // in for the full 24h — that's exactly what made a ticker's chart show
-  // "unavailable" for most of a day even after the key/quota issue cleared.
-  const isPartial = bundle.historicalMonthly.length === 0 || bundle.income.length === 0;
+  // If the underlying bundle was missing price history/financials, OR the
+  // analysis itself came back data-starved (dataQuality, computed from real
+  // checks-run counts — catches the AYI case specifically: historicalMonthly
+  // and income can both be non-empty while ratios/keyMetrics still failed),
+  // don't lock the broken result in for the full 24h — that's exactly what
+  // made a ticker's chart/rating show "unavailable" for most of a day even
+  // after the key/quota issue cleared.
+  const isPartial =
+    bundle.historicalMonthly.length === 0 || bundle.income.length === 0 || analysis.dataQuality === "insufficient";
   cache.set(cacheKey, analysis, isPartial ? PARTIAL_ANALYSIS_TTL_MS : undefined);
   return analysis;
 }
@@ -344,8 +353,28 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       bundle.historicalMonthly.map((p) => p.price)
     );
 
+    // Deterministic, never LLM-influenced — a stock where FMP and its
+    // Finnhub fallback both failed still gets *a* score from Groq (it's
+    // instructed to produce one), but that score is meaningless when 4/5
+    // Snowflake axes ran zero real checks. Confirmed live: AYI showed a
+    // clean "Hold, 55" card that looked identical to a genuinely-scored
+    // mediocre stock, with nothing telling the user the data just wasn't
+    // there. Counting axes with zero checks run is the same signal the UI
+    // already surfaces per-axis ("Score 3/6 but no checks were run") —
+    // this just makes it impossible to miss at the headline level too.
+    const emptyAxisCount = (Object.values(snowflakeScores) as { checks: unknown[] }[]).filter(
+      (axis) => axis.checks.length === 0
+    ).length;
+    const dataQuality: DataQuality = emptyAxisCount >= 3 ? "insufficient" : emptyAxisCount >= 1 ? "partial" : "full";
+    const oneLiner =
+      dataQuality === "insufficient"
+        ? `Not enough real financial data available for ${ticker} right now — treat any score as unreliable and verify independently.`
+        : base.oneLiner;
+
     return {
       ...base,
+      oneLiner,
+      dataQuality,
       historicalPrices: bundle.historicalMonthly.map((p) => ({ date: p.date, close: p.price })),
       fundamentalTrend: bundle.income.map((inc, i) => ({
         period: `FY${inc.fiscalYear}`,

@@ -49,7 +49,7 @@ export function ExpandedResearchSheet({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <h2 className="otto-text-title text-otto-text">{analysis.ticker}</h2>
-            <VerdictTag verdict={analysis.verdict} />
+            <VerdictTag verdict={analysis.verdict} dataQuality={analysis.dataQuality} />
           </div>
           <p className="otto-text-caption mt-0.5 text-otto-text-muted">{analysis.companyName}</p>
         </div>
@@ -117,10 +117,10 @@ export function ExpandedResearchSheet({
                 </div>
                 <p className="otto-text-body mt-3 max-w-md text-otto-text-muted">{analysis.oneLiner}</p>
               </div>
-              <ConvictionGauge score={analysis.convictionScore} />
+              <ConvictionGauge score={analysis.convictionScore} dataQuality={analysis.dataQuality} />
             </div>
             <p className="otto-text-body text-otto-text-muted">{analysis.synthesis}</p>
-            {analysis.positionSizing && (
+            {analysis.positionSizing && analysis.dataQuality !== "insufficient" && (
               <div className="rounded-lg border border-otto-border-soft bg-black/20 px-4 py-3 text-xs text-otto-text-muted">
                 <span className="font-medium text-otto-text">Suggested size: {analysis.positionSizing.suggestedPct}% of book.</span>{" "}
                 {analysis.positionSizing.rationale}

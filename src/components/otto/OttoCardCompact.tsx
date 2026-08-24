@@ -39,14 +39,14 @@ export function OttoCardCompact({
     <div
       className={clsx(
         "otto-material otto-collapse otto-elevation-raised otto-lift group w-full max-w-md rounded-2xl border p-5 text-left transition-colors hover:border-otto-text-faint",
-        glowClass(analysis.verdict)
+        analysis.dataQuality === "insufficient" ? "otto-glow-neutral" : glowClass(analysis.verdict)
       )}
     >
       <div className="flex items-start justify-between gap-4">
         <button onClick={onExpand} className="min-w-0 flex-1 text-left">
           <div className="flex items-center gap-2">
             <span className="otto-text-title text-otto-text">{analysis.ticker}</span>
-            <VerdictTag verdict={analysis.verdict} />
+            <VerdictTag verdict={analysis.verdict} dataQuality={analysis.dataQuality} />
           </div>
           <p className="otto-text-caption mt-0.5 truncate text-otto-text-muted">{analysis.companyName}</p>
 
@@ -79,9 +79,9 @@ export function OttoCardCompact({
             )}
             <span
               className="tabular-nums text-2xl font-semibold"
-              style={{ color: scoreColor(analysis.convictionScore) }}
+              style={{ color: analysis.dataQuality === "insufficient" ? "var(--otto-text-faint)" : scoreColor(analysis.convictionScore) }}
             >
-              {Math.round(analysis.convictionScore)}
+              {analysis.dataQuality === "insufficient" ? "—" : Math.round(analysis.convictionScore)}
             </span>
           </div>
           <MiniSparkline data={analysis.historicalPrices} positive={positive} />

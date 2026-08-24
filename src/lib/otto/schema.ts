@@ -6,6 +6,15 @@ import type { InsiderActivity } from "./insider";
 
 export type Verdict = "Strong Buy" | "Buy" | "Hold" | "Avoid" | "Strong Avoid";
 
+/**
+ * Computed deterministically from real checks-run counts (never from the
+ * LLM) — a confident-looking "Hold, 55" card is meaningless when every
+ * fundamentals axis defaulted to a neutral 3/6 because no real data was
+ * available, and that must never look identical to a genuinely-scored
+ * mediocre stock. "insufficient" means most axes had zero real checks run.
+ */
+export type DataQuality = "full" | "partial" | "insufficient";
+
 export interface HistoricalPoint {
   /** ISO date, e.g. "2025-08-01" */
   date: string;
@@ -135,4 +144,5 @@ export interface OttoAnalysis {
   peerValuation: PeerValuation | null;
   insiderActivity: InsiderActivity | null;
   generatedAt: string; // ISO timestamp
+  dataQuality: DataQuality;
 }

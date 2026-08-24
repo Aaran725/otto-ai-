@@ -47,6 +47,7 @@ const globalForCache = globalThis as unknown as {
   __ottoEarningsCache?: TtlCache<unknown>;
   __ottoShortInterestCache?: TtlCache<unknown>;
   __ottoSymbolScoreCache?: TtlCache<unknown>;
+  __ottoFinnhubFundamentalsCache?: TtlCache<unknown>;
 };
 
 export function getFmpCache<T>(): TtlCache<T> {
@@ -127,6 +128,19 @@ export function getSymbolScoreCache<T>(): TtlCache<T> {
   // free instead of linear in the number of screens run.
   globalForCache.__ottoSymbolScoreCache ??= new TtlCache(45 * 60 * 1000); // 45 min
   return globalForCache.__ottoSymbolScoreCache as TtlCache<T>;
+}
+
+export function getFinnhubFundamentalsCache<T>(): TtlCache<T> {
+  // Cached at the source (inside fetchFinnhubFundamentals itself), not per
+  // caller — so the screener's scan and a single-stock lookup for the same
+  // symbol share one real result instead of each risking its own fetch
+  // failure independently. This is what makes the single-stock path's
+  // Finnhub fallback benefit from the screener already having succeeded on
+  // the same ticker minutes earlier (confirmed live: AYI's screener entry
+  // had real data while its single-stock card, fetched moments later,
+  // didn't — this closes that gap by construction).
+  globalForCache.__ottoFinnhubFundamentalsCache ??= new TtlCache(30 * 60 * 1000); // 30 min
+  return globalForCache.__ottoFinnhubFundamentalsCache as TtlCache<T>;
 }
 
 export function getPeerCache<T>(): TtlCache<T> {

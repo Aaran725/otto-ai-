@@ -15,7 +15,7 @@ export function HeroBanner({ analysis }: { analysis: OttoAnalysis }) {
             <h1 className="otto-text-display text-otto-text">
               {analysis.ticker}
             </h1>
-            <VerdictTag verdict={analysis.verdict} />
+            <VerdictTag verdict={analysis.verdict} dataQuality={analysis.dataQuality} />
           </div>
           <p className="mt-1 text-sm text-otto-text-muted">{analysis.companyName}</p>
 
@@ -41,8 +41,8 @@ export function HeroBanner({ analysis }: { analysis: OttoAnalysis }) {
         </div>
 
         <div className="flex flex-col items-center gap-2">
-          <ConvictionGauge score={analysis.convictionScore} />
-          {analysis.positionSizing && (
+          <ConvictionGauge score={analysis.convictionScore} dataQuality={analysis.dataQuality} />
+          {analysis.positionSizing && analysis.dataQuality !== "insufficient" && (
             <div className="text-center" title={analysis.positionSizing.rationale}>
               <div className="tabular-nums text-sm font-semibold text-otto-text">
                 {analysis.positionSizing.suggestedPct}%

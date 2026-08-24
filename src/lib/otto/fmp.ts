@@ -273,7 +273,10 @@ export async function fetchBiggestGainers(): Promise<FmpMarketMover[]> {
   return fmpGetOptional<FmpMarketMover[]>("/biggest-gainers", {}, []);
 }
 
-const PARTIAL_BUNDLE_TTL_MS = 3 * 60 * 1000; // retry soon instead of staying broken for the full 30 min
+// Shortened from 3 min — the Finnhub fallback this now retries through
+// (see finnhub.ts's finnhubGet) is materially more resilient, so a bundle
+// that's still empty after that deserves a faster second chance.
+const PARTIAL_BUNDLE_TTL_MS = 60 * 1000;
 
 export async function fetchStockBundle(ticker: string, onProgress?: ProgressFn): Promise<StockBundle> {
   const symbol = ticker.toUpperCase();
@@ -295,8 +298,14 @@ export async function fetchStockBundle(ticker: string, onProgress?: ProgressFn):
   // A fetch that came back empty due to a rate limit (not a genuine "this
   // ticker has no data") shouldn't get stuck behind the full TTL — that's
   // exactly what caused a ticker to show "unavailable" for the better part
-  // of a day even after the underlying key/quota issue had cleared.
-  const isPartial = bundle.historicalMonthly.length === 0 || bundle.income.length === 0;
+  // of a day even after the underlying key/quota issue had cleared. Also
+  // covers ratios/keyMetrics both failing (the AYI case: FMP paywalled all
+  // three endpoints and the Finnhub fallback didn't land either) even when
+  // history/income happened to come through some other way.
+  const isPartial =
+    bundle.historicalMonthly.length === 0 ||
+    bundle.income.length === 0 ||
+    (bundle.ratios === null && bundle.keyMetrics === null);
   cache.set(symbol, bundle, isPartial ? PARTIAL_BUNDLE_TTL_MS : undefined);
   return bundle;
 }
