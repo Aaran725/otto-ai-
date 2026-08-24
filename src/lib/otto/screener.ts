@@ -331,7 +331,7 @@ async function sourceCandidates(
  * free tier is 60 req/min, not 250/day, which is what actually makes
  * screening dozens of candidates per request viable.
  */
-async function buildFinnhubBundle(symbol: string): Promise<StockBundle | null> {
+export async function buildFinnhubBundle(symbol: string): Promise<StockBundle | null> {
   const [quote, fundamentals] = await Promise.all([
     fetchFinnhubQuote(symbol),
     fetchFinnhubFundamentals(symbol),
@@ -409,7 +409,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
 // directly answer "is this a well-run, durable business"). "best"/"avoid"
 // stay balanced across all five since they're asking a general question,
 // not screening for one specific factor.
-const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
+export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
   momentum: { momentum: 2, growth: 1.5, quality: 0.5, valuation: 0.3, financialHealth: 0.5 },
   best: { valuation: 1, growth: 1, quality: 1, financialHealth: 1, momentum: 1 },
@@ -419,7 +419,7 @@ const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>>
   avoid: { valuation: 1, growth: 1, quality: 1, financialHealth: 1, momentum: 1 },
 };
 
-const ASCENDING_INTENTS = new Set<ScreenIntent>(["avoid"]);
+export const ASCENDING_INTENTS = new Set<ScreenIntent>(["avoid"]);
 
 /**
  * Tilts the base weights by the current macro regime rather than scoring
@@ -451,7 +451,7 @@ function applyRegimeTilt(
   return adjusted;
 }
 
-function scoreCandidate(intent: ScreenIntent, sf: OttoSnowflakeScores, weights: Partial<Record<SnowflakeAxis, number>> = AXIS_WEIGHTS[intent]): number {
+export function scoreCandidate(intent: ScreenIntent, sf: OttoSnowflakeScores, weights: Partial<Record<SnowflakeAxis, number>> = AXIS_WEIGHTS[intent]): number {
   const axes = Object.keys(weights) as SnowflakeAxis[];
   let weightedSum = 0;
   let weightTotal = 0;
@@ -475,7 +475,7 @@ function scoreCandidate(intent: ScreenIntent, sf: OttoSnowflakeScores, weights: 
 // point of that screen.
 const VALUE_SCORE_BLEND: Partial<Record<ScreenIntent, number>> = { undervalued: 0.5, best: 0.45 };
 
-function applyValueScoreBlend(intent: ScreenIntent, baseComposite: number, valueScore: number | null): number {
+export function applyValueScoreBlend(intent: ScreenIntent, baseComposite: number, valueScore: number | null): number {
   const blend = VALUE_SCORE_BLEND[intent];
   if (!blend || valueScore === null) return baseComposite;
   return Math.round(baseComposite * (1 - blend) + valueScore * blend);

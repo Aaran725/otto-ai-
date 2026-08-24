@@ -15,7 +15,10 @@ import { Redis } from "@upstash/redis";
  * Every read/write is now a network round-trip, so `get`/`set` are async
  * (`getOrSet` already was) — callers must `await` them.
  */
-const redis = new Redis({
+// Exported so other modules that need raw Redis commands (observability.ts's
+// counters/lists — INCR/LPUSH aren't expressible through the get/set-only
+// TtlCache below) reuse this same client instead of opening a second one.
+export const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL!,
   token: process.env.UPSTASH_REDIS_REST_TOKEN!,
 });

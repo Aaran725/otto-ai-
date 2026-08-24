@@ -17,5 +17,5 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Not authorized" }, { status: 401 });
     }
   }
-  return NextResponse.json(getMetricsSnapshot());
+  return NextResponse.json(await getMetricsSnapshot());
 }
