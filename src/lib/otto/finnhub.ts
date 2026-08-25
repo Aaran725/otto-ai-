@@ -24,7 +24,24 @@ class FinnhubApiError extends Error {
 // Sticky cursor, same pattern as fmp.ts — once a key gets rate-limited,
 // later calls start from the next key instead of re-failing the exhausted
 // one first every time.
-const globalForFinnhubRotation = globalThis as unknown as { __ottoFinnhubKeyIndex?: number };
+const globalForFinnhubRotation = globalThis as unknown as {
+  __ottoFinnhubKeyIndex?: number;
+  __ottoFinnhubOutageUntil?: number; // epoch ms — see OUTAGE_COOLDOWN_MS below
+};
+
+// Confirmed live: a wide screener scan (hundreds of candidates) hitting a
+// window where every one of the 6 rotated keys is simultaneously
+// rate-limited used to retry the FULL 6-key rotation for every single
+// remaining candidate — each retry cheap alone, but hundreds of them in
+// sequence pushed one real scan past Vercel's 90s function timeout, which
+// kills the request with no final event at all (a much worse user-facing
+// failure than an honest "couldn't complete" message). Once every key has
+// failed once, assume the outage is real for a short cooldown and fail
+// fast instead of re-proving it hundreds more times in the same request.
+// The next call after the cooldown naturally re-attempts the full
+// rotation, so a real recovery is picked up within OUTAGE_COOLDOWN_MS, not
+// papered over.
+const OUTAGE_COOLDOWN_MS = 20_000;
 
 async function finnhubRequest<T>(path: string, apiKey: string): Promise<T> {
   const sep = path.includes("?") ? "&" : "?";
@@ -49,6 +66,13 @@ async function finnhubGet<T>(path: string): Promise<T | null> {
   const keys = getFinnhubKeys();
   if (keys.length === 0) return null;
 
+  // Already know every key is down as of a few seconds ago — don't burn
+  // another 6 failed round-trips re-proving it for this one call. See
+  // OUTAGE_COOLDOWN_MS above.
+  if (Date.now() < (globalForFinnhubRotation.__ottoFinnhubOutageUntil ?? 0)) {
+    return null;
+  }
+
   const startIndex = globalForFinnhubRotation.__ottoFinnhubKeyIndex ?? 0;
   for (let attempt = 0; attempt < keys.length; attempt++) {
     const idx = (startIndex + attempt) % keys.length;
@@ -70,6 +94,7 @@ async function finnhubGet<T>(path: string): Promise<T | null> {
       continue;
     }
   }
+  globalForFinnhubRotation.__ottoFinnhubOutageUntil = Date.now() + OUTAGE_COOLDOWN_MS;
   recordEvent("finnhub_exhausted", { path });
   return null; // every key failed
 }

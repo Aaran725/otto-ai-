@@ -8,8 +8,11 @@ describe("freshnessMultiplier", () => {
   });
 
   it("returns exactly half weight at the half-life boundary", () => {
+    // Precision 1 (±0.05), not 2 — the date is truncated to day granularity
+    // (slice(0, 10) drops time-of-day), so depending on what time "now" is
+    // when this runs, up to ~24h of rounding error is expected, not a bug.
     const date = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    expect(freshnessMultiplier(date, 45)).toBeCloseTo(0.5, 2);
+    expect(freshnessMultiplier(date, 45)).toBeCloseTo(0.5, 1);
   });
 
   it("decays further for an older event, using a custom half-life", () => {

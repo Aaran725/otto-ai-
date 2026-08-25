@@ -29,16 +29,47 @@ export async function POST(request: Request) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const encoder = new TextEncoder();
+      // Guards against a double-close/double-send once the soft timeout
+      // below fires — the in-flight work below keeps running in the
+      // background even after the timeout wins the race (there's no clean
+      // way to cancel a nested Finnhub/SEC fetch chain), so anything it
+      // tries to send/close afterward must silently no-op instead of
+      // throwing on an already-closed controller.
+      let settled = false;
       function send(event: ChatStreamEvent) {
+        if (settled) return;
         controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
+      }
+      function closeOnce() {
+        if (settled) return;
+        settled = true;
+        try {
+          controller.close();
+        } catch {
+          // Already closed/errored — nothing to do.
+        }
       }
 
       if (!message) {
         send({ type: "done", error: "Message is required" });
-        controller.close();
+        closeOnce();
         return;
       }
 
+      // A real Vercel platform timeout (maxDuration above) kills the
+      // function with no final event at all — the client then falls back
+      // to a generic "Something went wrong," a worse failure than an
+      // honest message. Confirmed live: a wide screener scan hit a window
+      // where every Finnhub key was rate-limited at once, and retrying
+      // through hundreds of candidates pushed one real request to the 90s
+      // wall. This soft internal timeout fires first, with real margin,
+      // so the user always gets an explicit "this timed out" message
+      // instead of a silently dropped stream — the in-flight work isn't
+      // cancelled (no clean way to), it just loses the race to report.
+      const SOFT_TIMEOUT_MS = 80_000;
+      const timeout = new Promise<void>((resolve) => setTimeout(resolve, SOFT_TIMEOUT_MS));
+
+      const work = (async () => {
       try {
         const lastCard = [...history].reverse().find((m) => m.role === "assistant" && m.card)?.card;
 
@@ -47,7 +78,7 @@ export async function POST(request: Request) {
           const bundle = await fetchStockBundle(resolved.symbol, emit);
           const analysis = await runOttoAnalysis(resolved.symbol, bundle, emit);
           send({ type: "done", reply: analysis.oneLiner, card: analysis });
-          controller.close();
+          closeOnce();
         }
 
         // A ticker mentioned in a question about the stock we're already
@@ -152,7 +183,7 @@ export async function POST(request: Request) {
                         ? "Screened the market, but Otto and Wall Street are largely in agreement right now — nothing cleared a real 20-point gap between Otto's own forecast and the analyst consensus. That's a legitimate result, not a data hiccup; try again later as forecasts update."
                         : "Couldn't screen the market right now — data provider is temporarily unavailable, or no matches for that filter. Try again shortly, or ask about a specific ticker.";
               send({ type: "done", reply });
-              controller.close();
+              closeOnce();
               return;
             }
             const label = [capFilter?.label, theme?.label].filter(Boolean).join(" ") || null;
@@ -175,7 +206,7 @@ export async function POST(request: Request) {
                 isAvoidList: screenIntent === "avoid",
               },
             });
-            controller.close();
+            closeOnce();
             return;
           }
 
@@ -204,7 +235,7 @@ export async function POST(request: Request) {
           const visual = topic ? buildFollowUpVisual(topic, lastCard) : undefined;
           const reply = await runOttoFollowUp(lastCard, message);
           send({ type: "done", reply, visual });
-          controller.close();
+          closeOnce();
           return;
         }
 
@@ -212,11 +243,18 @@ export async function POST(request: Request) {
           type: "done",
           reply: "Give me a ticker, company name, or ask something like \"what's undervalued\" and I'll run the numbers.",
         });
-        controller.close();
+        closeOnce();
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
         send({ type: "done", error: message });
-        controller.close();
+        closeOnce();
+      }
+      })();
+
+      await Promise.race([work, timeout]);
+      if (!settled) {
+        send({ type: "done", error: "This is taking Otto longer than usual and timed out — try again in a moment." });
+        closeOnce();
       }
     },
   });
