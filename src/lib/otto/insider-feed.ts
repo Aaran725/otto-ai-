@@ -21,6 +21,11 @@ export interface InsiderClusterEntry {
   netShares: number; // positive = net buying
   buys: number;
   sells: number;
+  // Most recent open-market transaction date seen for this issuer across
+  // the feed window, ISO "YYYY-MM-DD" — used to decay the cluster nudge by
+  // real recency (see freshness.ts). Optional: absent if no transaction in
+  // this issuer's filings had a parseable date.
+  mostRecentTransactionDate?: string;
 }
 
 interface FeedEntry {
@@ -81,6 +86,7 @@ interface ParsedForm4 {
   netShares: number;
   buys: number;
   sells: number;
+  mostRecentTransactionDate?: string;
 }
 
 function parseForm4(xml: string): ParsedForm4 | null {
@@ -92,6 +98,7 @@ function parseForm4(xml: string): ParsedForm4 | null {
   let netShares = 0;
   let buys = 0;
   let sells = 0;
+  let mostRecentTransactionDate: string | undefined;
   for (const block of blocks) {
     const code = block.match(/<transactionCode>\s*([A-Z])\s*<\/transactionCode>/)?.[1];
     const shares = Number(block.match(/<transactionShares>\s*<value>([\d.]+)<\/value>/)?.[1] ?? "0");
@@ -104,10 +111,14 @@ function parseForm4(xml: string): ParsedForm4 | null {
     } else if (code === "S") {
       sells++;
       netShares -= shares;
+    } else {
+      continue;
     }
+    const date = block.match(/<transactionDate>\s*<value>([\d-]+)<\/value>/)?.[1];
+    if (date && (!mostRecentTransactionDate || date > mostRecentTransactionDate)) mostRecentTransactionDate = date;
   }
   if (buys === 0 && sells === 0) return null;
-  return { symbol: symbol.toUpperCase(), companyName, netShares, buys, sells };
+  return { symbol: symbol.toUpperCase(), companyName, netShares, buys, sells, mostRecentTransactionDate };
 }
 
 /**
@@ -146,8 +157,18 @@ export async function fetchInsiderClusterFeed(feedCount = 100): Promise<InsiderC
         existing.netShares += p.netShares;
         existing.buys += p.buys;
         existing.sells += p.sells;
+        if (p.mostRecentTransactionDate && (!existing.mostRecentTransactionDate || p.mostRecentTransactionDate > existing.mostRecentTransactionDate)) {
+          existing.mostRecentTransactionDate = p.mostRecentTransactionDate;
+        }
       } else {
-        byTicker.set(p.symbol, { symbol: p.symbol, companyName: p.companyName, netShares: p.netShares, buys: p.buys, sells: p.sells });
+        byTicker.set(p.symbol, {
+          symbol: p.symbol,
+          companyName: p.companyName,
+          netShares: p.netShares,
+          buys: p.buys,
+          sells: p.sells,
+          mostRecentTransactionDate: p.mostRecentTransactionDate,
+        });
       }
     }
     return [...byTicker.values()];

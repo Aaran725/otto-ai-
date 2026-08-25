@@ -10,15 +10,16 @@ import { fetchSecUniverse, fetchCikForSymbol, type UniverseEntry } from "./sec-u
 import { computeSnowflake, type OttoSnowflakeScores } from "./snowflake";
 import { getScreenerCache, getSymbolScoreCache, getDailyPriceCache } from "./cache";
 import { mapWithConcurrency } from "./batch";
-import { fetchAlpacaHistoricalDaily, type DailyPricePoint } from "./alpaca";
+import { fetchAlpacaHistoricalDaily, fetchAlpacaHistoricalMonthly, type DailyPricePoint } from "./alpaca";
+import { fetchYahooHistoricalMonthly, fetchYahooPriceTarget } from "./yahoo";
 import { diversifySelection } from "./correlation";
 import { recordEvent } from "./observability";
+import { freshnessMultiplier } from "./freshness";
 import { fetchInsiderActivity, type InsiderActivity } from "./insider";
 import { fetchInsiderClusterFeed, type InsiderClusterEntry } from "./insider-feed";
 import { fetchRiskFactorExcerpt } from "./sec-edgar";
 import { fetchMacroContext } from "./fred";
 import { fetchPeerValuation } from "./peers";
-import { fetchYahooPriceTarget } from "./yahoo";
 import { fetchEarningsRecord, type EarningsRecord } from "./earnings";
 import { fetchShortInterest, type ShortInterestData } from "./short-interest";
 import type { ProgressFn } from "./chat-types";
@@ -684,6 +685,21 @@ async function fetchDailyPriceSeriesFor(symbols: string[]): Promise<Map<string, 
   return new Map(results);
 }
 
+/**
+ * Monthly closes for volatility-adjusted sizing (see targetAllocation in
+ * screener-track-record.ts) — reuses the exact fetch/fallback pair already
+ * used for SPY-vs-call-date tracking elsewhere (Alpaca first, Yahoo if
+ * empty), just for the finalist symbol instead of SPY. Not cached
+ * separately: fetchAlpacaHistoricalMonthly/fetchYahooHistoricalMonthly
+ * don't cache internally, but this only runs once per finalist per fresh
+ * scan (never on a cache hit), so it's a handful of calls, not a hot path.
+ */
+async function fetchMonthlyClosesFor(symbol: string): Promise<number[]> {
+  const alpaca = await fetchAlpacaHistoricalMonthly(symbol).catch(() => []);
+  const points = alpaca.length > 0 ? alpaca : await fetchYahooHistoricalMonthly(symbol).catch(() => []);
+  return points.map((p) => p.price);
+}
+
 export async function runScreener(
   intent: ScreenIntent,
   theme: ThemeFilter | null = null,
@@ -1033,22 +1049,36 @@ export async function runScreener(
     // remembering to update two places in sync.
     function buildWhyNudges(c: ScreenerCandidate): ScreenerWhyNudge[] {
       const nudges: ScreenerWhyNudge[] = [];
+      // A 3-day-old insider buy and an 85-day-old one shouldn't carry the
+      // same weight — decay every insider-family nudge by real recency
+      // (see freshness.ts). Prefers the per-company check's own most recent
+      // transaction date; falls back to the cluster feed's date when the
+      // per-company check came back empty and insiderActivity itself is the
+      // cluster-feed fallback (transactions: [], see its construction
+      // above) — and falls open to full weight (1) if neither has a date,
+      // never silently zeroing a real signal just because its date wasn't
+      // extracted.
+      const clusterEntryDate = clusterBySymbol.get(c.symbol)?.mostRecentTransactionDate;
+      const insiderDate = c.insiderActivity?.transactions[0]?.date ?? clusterEntryDate;
+      const insiderFreshness = freshnessMultiplier(insiderDate);
+
       const cluster = clusterNudgeFor(c.symbol);
       if (cluster !== 0) {
         nudges.push({
           type: "cluster",
           label: cluster > 0 ? "Market-wide insider buying cluster" : "Market-wide insider selling cluster",
-          points: cluster,
+          points: cluster * freshnessMultiplier(clusterEntryDate),
         });
       }
-      if (c.insiderActivity?.direction === "buying") nudges.push({ type: "insider", label: "Insider buying (90d)", points: INSIDER_NUDGE });
+      if (c.insiderActivity?.direction === "buying")
+        nudges.push({ type: "insider", label: "Insider buying (90d)", points: INSIDER_NUDGE * insiderFreshness });
       else if (c.insiderActivity?.direction === "selling")
-        nudges.push({ type: "insider", label: "Insider selling (90d)", points: -INSIDER_NUDGE });
+        nudges.push({ type: "insider", label: "Insider selling (90d)", points: -INSIDER_NUDGE * insiderFreshness });
       if (c.insiderActivity?.hasCSuiteBuying) {
         nudges.push({
           type: "officerBuying",
           label: `${c.insiderActivity.topOfficerTitle ?? "Officer"} buying with own money`,
-          points: OFFICER_BUYING_NUDGE,
+          points: OFFICER_BUYING_NUDGE * insiderFreshness,
         });
       }
       const trend = ratingTrendBySymbol.get(c.symbol);
@@ -1083,9 +1113,18 @@ export async function runScreener(
         if (shortInterest.daysToCover > 5) riskFlags += 1;
         if (shortInterest.daysToCover > 10) riskFlags += 1;
         if (shortInterest.changePercent > 10) riskFlags += 1;
+        // Sustained build, not just one jump: the settlement BEFORE this one
+        // also rose. Two consecutive rising periods is a distinct, stronger
+        // signal than a single changePercent > 10 spike (already flagged
+        // above) — a build that's accelerating, not a one-off print.
+        const accelerating = shortInterest.changePercent > 0 && (shortInterest.priorChangePercent ?? 0) > 0;
+        if (accelerating) riskFlags += 1;
         if (riskFlags > 0) {
           const points = -(Math.min(riskFlags, 3) / 3) * SHORT_INTEREST_NUDGE_MAX;
-          nudges.push({ type: "shortInterest", label: `Short interest risk (${shortInterest.daysToCover.toFixed(1)} days to cover)`, points });
+          const label = accelerating
+            ? `Short interest risk (${shortInterest.daysToCover.toFixed(1)} days to cover, building for 2 straight periods)`
+            : `Short interest risk (${shortInterest.daysToCover.toFixed(1)} days to cover)`;
+          nudges.push({ type: "shortInterest", label, points });
         }
       }
       // Fail-fast kill switch: a factor net-negative on real evaluated
@@ -1258,6 +1297,7 @@ export async function runScreener(
     // catches its own errors internally.
     for (let i = 0; i < finalists.length; i++) {
       const c = finalists[i];
+      const monthlyCloses = await fetchMonthlyClosesFor(c.symbol);
       await logScreenerCall({
         intent,
         symbol: c.symbol,
@@ -1266,6 +1306,7 @@ export async function runScreener(
         compositeScore: c.compositeScore,
         isFlagship: i === 0,
         nudges: c.whyBreakdown?.nudges ?? [],
+        monthlyCloses,
       });
     }
 

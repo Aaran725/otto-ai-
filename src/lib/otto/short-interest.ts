@@ -7,6 +7,14 @@ export interface ShortInterestData {
   daysToCover: number;
   changePercent: number; // vs the prior settlement period
   settlementDate: string;
+  // The settlement BEFORE the one above, when the 45-day window caught two
+  // (FINRA publishes biweekly) — its own reported changePercent, not
+  // re-derived from share counts. Lets a caller tell "one jump" apart from
+  // "two consecutive rising periods," a genuinely different, stronger
+  // signal a single period's changePercent can't show. Optional: absent
+  // when only one settlement fell in the window.
+  priorChangePercent?: number;
+  priorSettlementDate?: string;
 }
 
 /**
@@ -62,7 +70,17 @@ export async function fetchShortInterest(symbol: string): Promise<ShortInterestD
       const changePercent = Number(latest[changeIdx]);
       if (!Number.isFinite(shortShares) || !Number.isFinite(daysToCover)) return null;
 
-      return { shortShares, daysToCover, changePercent, settlementDate: latest[dateIdx] };
+      const prior = rows[1];
+      const priorChangePercent = prior ? Number(prior[changeIdx]) : undefined;
+      const hasPrior = priorChangePercent !== undefined && Number.isFinite(priorChangePercent);
+
+      return {
+        shortShares,
+        daysToCover,
+        changePercent,
+        settlementDate: latest[dateIdx],
+        ...(hasPrior ? { priorChangePercent, priorSettlementDate: prior[dateIdx] } : {}),
+      };
     } catch {
       return null;
     }

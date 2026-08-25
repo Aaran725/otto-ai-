@@ -2,6 +2,7 @@ import { redis } from "./cache";
 import { fetchFinnhubQuote } from "./finnhub";
 import { fetchAlpacaHistoricalMonthly } from "./alpaca";
 import { fetchYahooHistoricalMonthly } from "./yahoo";
+import { computePositionSizing } from "./position-sizing";
 import type { ScreenIntent, NudgeType, ScreenerWhyNudge } from "./screener";
 
 /**
@@ -128,15 +129,31 @@ async function getPortfolio(): Promise<PortfolioState> {
 
 // Sizing is a percentage of the ORIGINAL $10,000 stake, not shrinking
 // remaining cash — position sizes stay stable and comparable across the
-// portfolio's life instead of shrinking as capital deploys. Scaled by
-// conviction (the final composite score): a 100-score pick gets the full
-// 12%, a 0-score pick (which would never actually reach a finalist slot,
-// given Phase C's floors) would get the 4% minimum.
+// portfolio's life instead of shrinking as capital deploys.
 const MIN_ALLOCATION_PCT = 4;
 const MAX_ALLOCATION_PCT = 12;
-function targetAllocation(compositeScore: number): number {
-  const clamped = Math.max(0, Math.min(100, compositeScore));
-  const pct = MIN_ALLOCATION_PCT + (clamped / 100) * (MAX_ALLOCATION_PCT - MIN_ALLOCATION_PCT);
+
+/**
+ * Volatility-adjusted sizing — reuses the fractional-Kelly heuristic already
+ * built and live in the single-stock chat flow (position-sizing.ts), rather
+ * than the flat linear-by-score formula this used to be. A high-conviction
+ * but high-volatility name can now size SMALLER than a lower-conviction but
+ * stable one — that's the intended effect of folding in real volatility,
+ * not a bug. Still clamped to this portfolio's own 4-12% band (deliberately
+ * narrower than position-sizing.ts's own 15% single-stock cap — different
+ * risk contexts: a diversified 5-pick simulated portfolio vs. one-off
+ * single-stock advisory sizing — not something to "fix" into matching).
+ * Falls back to the 4% floor (never $0) when there isn't enough monthly
+ * price history for a real volatility read, or when the sizer itself
+ * declines to size (e.g. edge <= 0) — a real finalist pick is never left
+ * unlogged or logged at $0 "phantom" size just because volatility data was
+ * thin (see logScreenerCall's own "never skip a call" comment below).
+ */
+function targetAllocation(compositeScore: number, monthlyCloses: number[]): number {
+  const sizing = computePositionSizing(compositeScore, monthlyCloses);
+  const floor = Math.round((MIN_ALLOCATION_PCT / 100) * STARTING_CASH);
+  if (!sizing || sizing.suggestedPct <= 0) return floor;
+  const pct = Math.max(MIN_ALLOCATION_PCT, Math.min(MAX_ALLOCATION_PCT, sizing.suggestedPct));
   return Math.round((pct / 100) * STARTING_CASH);
 }
 
@@ -164,6 +181,7 @@ export async function logScreenerCall(params: {
   compositeScore: number;
   isFlagship: boolean;
   nudges: ScreenerWhyNudge[];
+  monthlyCloses: number[]; // for volatility-adjusted sizing — see targetAllocation
 }): Promise<void> {
   // "avoid" isn't a recommendation to buy — a track record is fundamentally
   // about "here's what we told people to consider, did it work out," and an
@@ -192,7 +210,7 @@ export async function logScreenerCall(params: {
     // well-funded days. When cash is scarce it just gets a smaller (or
     // $0, "watch only") stake instead; the call itself is always tracked.
     const portfolio = await getPortfolio();
-    const target = targetAllocation(params.compositeScore);
+    const target = targetAllocation(params.compositeScore, params.monthlyCloses);
     const allocatedAmount = Math.max(0, Math.min(target, portfolio.cashAvailable));
 
     const now = Date.now();
