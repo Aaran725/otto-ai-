@@ -2,7 +2,7 @@ import { redis } from "./cache";
 import { fetchFinnhubQuote } from "./finnhub";
 import { fetchAlpacaHistoricalMonthly } from "./alpaca";
 import { fetchYahooHistoricalMonthly } from "./yahoo";
-import type { ScreenIntent } from "./screener";
+import type { ScreenIntent, NudgeType, ScreenerWhyNudge } from "./screener";
 
 /**
  * Permanent, append-only record of every real screener recommendation —
@@ -44,9 +44,21 @@ export interface ScreenerCallRecord {
   calledAt: string; // ISO timestamp
   peakPrice: number; // highest real daily price seen since calledAt (starts equal to priceAtCall)
   peakAt: string; // ISO timestamp of when peakPrice was set
+  // A new PRICE high isn't the same as a new ALPHA high — a stock can hit a
+  // fresh price peak while SPY rose just as much over the same window,
+  // meaning it isn't actually outperforming any harder. This tracks the
+  // real, direction-aware alpha high-water mark (see computeAlpha) —
+  // starts at 0, since alpha at the moment of the call is 0 by definition.
+  peakAlphaPct: number;
+  peakAlphaAt: string;
   allocatedAmount: number; // simulated dollars staked at call time — see PORTFOLIO_* below
   closed: boolean; // true once its d180 milestone has been evaluated and capital returned to cash
   isFlagship: boolean; // true only for the #1-ranked pick of its scan — see logScreenerCall
+  // Which real-signal nudges fired for this pick and how many points each
+  // contributed (type + points only, not the interpolated display label —
+  // this is what getFactorContributions groups real outcomes by, not
+  // something shown directly). See screener.ts's buildWhyNudges.
+  nudges: { type: NudgeType; points: number }[];
   evaluations: Partial<Record<`d${Milestone}`, ScreenerCallEvaluation>>;
 }
 
@@ -122,6 +134,7 @@ export async function logScreenerCall(params: {
   price: number;
   compositeScore: number;
   isFlagship: boolean;
+  nudges: ScreenerWhyNudge[];
 }): Promise<void> {
   // "avoid" isn't a recommendation to buy — a track record is fundamentally
   // about "here's what we told people to consider, did it work out," and an
@@ -166,9 +179,12 @@ export async function logScreenerCall(params: {
       calledAt: nowIso,
       peakPrice: params.price,
       peakAt: nowIso,
+      peakAlphaPct: 0,
+      peakAlphaAt: nowIso,
       allocatedAmount,
       closed: false,
       isFlagship: params.isFlagship,
+      nudges: params.nudges.map((n) => ({ type: n.type, points: n.points })),
       evaluations: {},
     };
     await Promise.all([
@@ -367,36 +383,75 @@ export async function getFlagshipSummary(): Promise<FlagshipSummary> {
 /**
  * Daily peak update — checks today's real price for every call still
  * within the tracking window and raises peakPrice/peakAt if today's price
- * is a new high since the call was made. This is a real, daily-granularity
- * high-water mark (not a continuous intraday peak — the cron only runs
- * once a day), so it can miss an intraday spike that fully reverted before
- * the next sweep, but it correctly captures any peak that held through at
- * least one daily check. Never lowers peakPrice — a peak, once real, stays
- * on the record even after the price comes back down.
+ * is a new high since the call was made, AND separately raises
+ * peakAlphaPct/peakAlphaAt if today's real alpha vs SPY (not just raw
+ * price) is a new high — a fresh price high isn't automatically a fresh
+ * alpha high if SPY moved just as much over the same stretch. Both are
+ * real, daily-granularity high-water marks (not continuous intraday peaks
+ * — the cron only runs once a day), so either can miss an intraday spike
+ * that fully reverted before the next sweep, but both correctly capture
+ * any peak that held through at least one daily check. Neither ever
+ * lowers — a peak, once real, stays on the record even after the price or
+ * alpha comes back down.
  */
-export async function updateDailyPeaks(): Promise<{ updated: number; checked: number }> {
+export async function updateDailyPeaks(): Promise<{ updated: number; alphaHighs: number; checked: number }> {
   const calls = await getAllScreenerCalls();
   const now = Date.now();
   const active = calls.filter((c) => (now - new Date(c.calledAt).getTime()) / MS_PER_DAY <= PEAK_TRACKING_WINDOW_DAYS);
-  if (active.length === 0) return { updated: 0, checked: calls.length };
+  if (active.length === 0) return { updated: 0, alphaHighs: 0, checked: calls.length };
+
+  // A new PRICE high isn't automatically a new ALPHA high — SPY could have
+  // moved just as much over the same window — so alpha needs its own real
+  // SPY-vs-call-date comparison, same as evaluateDueScreenerCalls.
+  const [spyHistoryAlpaca, spyQuote] = await Promise.all([
+    fetchAlpacaHistoricalMonthly("SPY").catch(() => []),
+    fetchFinnhubQuote("SPY").catch(() => null),
+  ]);
+  const spyHistory = spyHistoryAlpaca.length > 0 ? spyHistoryAlpaca : await fetchYahooHistoricalMonthly("SPY").catch(() => []);
+  const spyCurrent = spyQuote?.price ?? null;
 
   let updated = 0;
+  let alphaHighs = 0;
   for (const call of active) {
     try {
       const quote = await fetchFinnhubQuote(call.symbol).catch(() => null);
       const currentPrice = quote?.price ?? null;
-      if (currentPrice === null || currentPrice <= call.peakPrice) continue;
-      await redis.set(recordKey(call.id), {
-        ...call,
-        peakPrice: currentPrice,
-        peakAt: new Date(now).toISOString(),
-      });
-      updated += 1;
+      if (currentPrice === null) continue;
+
+      const nowIso = new Date(now).toISOString();
+      let peakPrice = call.peakPrice;
+      let peakAt = call.peakAt;
+      let priceChanged = false;
+      if (currentPrice > call.peakPrice) {
+        peakPrice = currentPrice;
+        peakAt = nowIso;
+        priceChanged = true;
+      }
+
+      let peakAlphaPct = call.peakAlphaPct;
+      let peakAlphaAt = call.peakAlphaAt;
+      let alphaChanged = false;
+      const spyAtCall = nearestPrice(spyHistory, call.calledAt);
+      if (spyAtCall !== null && spyCurrent !== null) {
+        const stockReturnPct = ((currentPrice - call.priceAtCall) / call.priceAtCall) * 100;
+        const spyReturnPct = ((spyCurrent - spyAtCall) / spyAtCall) * 100;
+        const currentAlphaPct = computeAlpha(call.intent, stockReturnPct, spyReturnPct);
+        if (currentAlphaPct > call.peakAlphaPct) {
+          peakAlphaPct = currentAlphaPct;
+          peakAlphaAt = nowIso;
+          alphaChanged = true;
+        }
+      }
+
+      if (!priceChanged && !alphaChanged) continue;
+      await redis.set(recordKey(call.id), { ...call, peakPrice, peakAt, peakAlphaPct, peakAlphaAt });
+      if (priceChanged) updated += 1;
+      if (alphaChanged) alphaHighs += 1;
     } catch {
       // one bad symbol shouldn't sink the whole sweep
     }
   }
-  return { updated, checked: active.length };
+  return { updated, alphaHighs, checked: active.length };
 }
 
 /**
@@ -470,4 +525,119 @@ export async function evaluateDueScreenerCalls(): Promise<{ evaluated: number; c
     }
   }
   return { evaluated, checked: calls.length };
+}
+
+/**
+ * Fail-fast kill switch — "monitor every factor's real contribution, kill
+ * anything net-negative for a full rolling quarter, don't wait for a
+ * scheduled review." All 8 real-signal nudge types (see NudgeType in
+ * screener.ts) are checked here, against real logged picks and their real
+ * evaluated outcomes — not a backtest, not a simulation, the actual track
+ * record this app is building starting today. Honest limitation, stated
+ * plainly: with a brand-new $10k portfolio, no factor will have both 15+
+ * real samples AND a 90-day-old sample within the same run for months —
+ * this is real infrastructure that activates itself organically as data
+ * accumulates, not something that can fire on day one.
+ */
+const KILLED_FACTORS_KEY = `${NAMESPACE}:killed-factors`;
+const ROLLING_QUARTER_DAYS = 90;
+const MIN_FACTOR_SAMPLE_SIZE = 15; // enough that one or two bad picks can't kill a real factor off pure noise
+
+const ALL_NUDGE_TYPES: NudgeType[] = [
+  "cluster",
+  "insider",
+  "officerBuying",
+  "ratingTrend",
+  "sectorValuation",
+  "forecastUpside",
+  "earnings",
+  "shortInterest",
+];
+
+export async function getKilledFactors(): Promise<Set<NudgeType>> {
+  try {
+    const stored = await redis.get<NudgeType[]>(KILLED_FACTORS_KEY);
+    return new Set(stored ?? []);
+  } catch {
+    return new Set();
+  }
+}
+
+export interface FactorContribution {
+  type: NudgeType;
+  sampleSize: number;
+  avgAlphaPct: number | null;
+  oldestSampleAt: string | null;
+}
+
+/** The most mature evaluation available for a call — most real calls right
+ * now will only have d30 (or nothing yet), so this can't wait for d180
+ * everywhere without leaving the kill switch permanently starved of data;
+ * it uses whatever real, actually-evaluated number exists, preferring the
+ * longer, more mature horizon when more than one is available. */
+function bestAvailableAlpha(call: ScreenerCallRecord): number | null {
+  return call.evaluations.d180?.alphaPct ?? call.evaluations.d90?.alphaPct ?? call.evaluations.d30?.alphaPct ?? null;
+}
+
+/**
+ * Real, per-factor performance — for every nudge type, the average
+ * realized alpha of picks where that factor actually fired (points !== 0),
+ * using each pick's most mature real evaluation. This is what
+ * evaluateFactorKillSwitch decides from, and what the private page can
+ * show directly so a human can see the same numbers the kill switch acts
+ * on, not just its conclusions.
+ */
+export async function getFactorContributions(): Promise<FactorContribution[]> {
+  const calls = await getAllScreenerCalls();
+  const byType = new Map<NudgeType, { alphas: number[]; calledAts: string[] }>();
+  for (const call of calls) {
+    const alpha = bestAvailableAlpha(call);
+    if (alpha === null) continue;
+    for (const n of call.nudges) {
+      if (n.points === 0) continue; // factor present but contributed nothing (e.g. already killed) — not a real sample of it working
+      const bucket = byType.get(n.type) ?? { alphas: [], calledAts: [] };
+      bucket.alphas.push(alpha);
+      bucket.calledAts.push(call.calledAt);
+      byType.set(n.type, bucket);
+    }
+  }
+  return ALL_NUDGE_TYPES.map((type) => {
+    const bucket = byType.get(type);
+    if (!bucket || bucket.alphas.length === 0) return { type, sampleSize: 0, avgAlphaPct: null, oldestSampleAt: null };
+    return {
+      type,
+      sampleSize: bucket.alphas.length,
+      avgAlphaPct: average(bucket.alphas),
+      oldestSampleAt: [...bucket.calledAts].sort()[0],
+    };
+  });
+}
+
+/**
+ * Runs as part of the daily cron (see /api/track-record/evaluate) —
+ * checking daily is strictly more responsive than the "weekly" ask, and
+ * reuses the existing cron instead of adding a third one (Vercel Hobby's
+ * cron-count limit). A factor only gets killed once it has both a real
+ * minimum sample size AND a genuine 90-day-old sample in the mix — not 15
+ * picks all made last week. Once killed, a factor stays killed — no
+ * automatic un-killing if its numbers later improve; bringing a disabled
+ * factor back is a real decision for a human to make deliberately, not
+ * something that should flip-flop on its own.
+ */
+export async function evaluateFactorKillSwitch(): Promise<{ killed: NudgeType[]; newlyKilled: NudgeType[]; contributions: FactorContribution[] }> {
+  const [contributions, killed] = await Promise.all([getFactorContributions(), getKilledFactors()]);
+  const now = Date.now();
+  const newlyKilled: NudgeType[] = [];
+  for (const c of contributions) {
+    if (killed.has(c.type)) continue;
+    if (c.sampleSize < MIN_FACTOR_SAMPLE_SIZE || c.oldestSampleAt === null) continue;
+    const spanDays = (now - new Date(c.oldestSampleAt).getTime()) / MS_PER_DAY;
+    if (spanDays < ROLLING_QUARTER_DAYS) continue;
+    if (c.avgAlphaPct !== null && c.avgAlphaPct < 0) {
+      killed.add(c.type);
+      newlyKilled.push(c.type);
+    }
+  }
+  if (newlyKilled.length > 0) await redis.set(KILLED_FACTORS_KEY, [...killed]);
+  return { killed: [...killed], newlyKilled, contributions };
 }

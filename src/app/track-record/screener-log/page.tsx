@@ -1,5 +1,22 @@
 import Link from "next/link";
-import { getScreenerCallsWithLiveMarks, getPortfolioSummary, getFlagshipSummary } from "@/lib/otto/screener-track-record";
+import {
+  getScreenerCallsWithLiveMarks,
+  getPortfolioSummary,
+  getFlagshipSummary,
+  getFactorContributions,
+  getKilledFactors,
+} from "@/lib/otto/screener-track-record";
+
+const NUDGE_TYPE_LABELS: Record<string, string> = {
+  cluster: "Insider cluster (market-wide)",
+  insider: "Insider activity (90d)",
+  officerBuying: "Officer buying (own money)",
+  ratingTrend: "Analyst rating trend",
+  sectorValuation: "Sector valuation percentile",
+  forecastUpside: "Forecast upside",
+  earnings: "Earnings track record",
+  shortInterest: "Short interest risk",
+};
 
 export const metadata = { title: "Screener Track Record (private) — Otto AI" };
 export const dynamic = "force-dynamic";
@@ -28,6 +45,16 @@ function fmtDollars(n: number) {
   return `$${n.toLocaleString("en-US")}`;
 }
 
+/** "Still climbing" means the alpha high was set very recently (the daily
+ * cron just caught it) AND live alpha hasn't since pulled back off that
+ * peak — a genuinely live, still-holding high, not a stale one from weeks
+ * ago that just happens to still be the record. */
+function isRecentAlphaHigh(c: { peakAlphaPct: number; peakAlphaAt: string; live: { alphaPct: number } | null }): boolean {
+  const daysSincePeak = (Date.now() - new Date(c.peakAlphaAt).getTime()) / (24 * 60 * 60 * 1000);
+  const stillAtPeak = c.live !== null && c.live.alphaPct >= c.peakAlphaPct - 0.5;
+  return daysSincePeak <= 2 && c.peakAlphaPct > 0 && stillAtPeak;
+}
+
 export default async function ScreenerTrackRecordPage({
   searchParams,
 }: {
@@ -43,10 +70,12 @@ export default async function ScreenerTrackRecordPage({
     );
   }
 
-  const [calls, portfolio, flagship] = await Promise.all([
+  const [calls, portfolio, flagship, factorContributions, killedFactors] = await Promise.all([
     getScreenerCallsWithLiveMarks(),
     getPortfolioSummary(),
     getFlagshipSummary(),
+    getFactorContributions(),
+    getKilledFactors(),
   ]);
   calls.sort((a, b) => new Date(b.calledAt).getTime() - new Date(a.calledAt).getTime());
   const flagshipAlpha = flagship.avgLiveAlphaPct ?? flagship.avgD30AlphaPct ?? flagship.avgD90AlphaPct ?? flagship.avgD180AlphaPct;
@@ -111,6 +140,39 @@ export default async function ScreenerTrackRecordPage({
         </span>
       </div>
 
+      <div className="mt-6">
+        <h2 className="otto-text-label text-otto-text-faint">Factor performance — fail-fast kill switch</h2>
+        <p className="otto-text-caption mt-1 text-otto-text-faint">
+          Real avg alpha of picks where each signal actually fired. A factor needs 15+ real samples AND a genuine 90-day-old
+          sample before it's eligible to be killed — with a brand-new record, most rows below will show &ldquo;not enough
+          data yet,&rdquo; honestly, not a fake result.
+        </p>
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {factorContributions.map((f) => {
+            const isKilled = killedFactors.has(f.type);
+            return (
+              <div
+                key={f.type}
+                className={`rounded-xl border p-3 ${isKilled ? "border-otto-bear/40 bg-otto-bear-soft" : "border-otto-border-soft bg-white/[0.02]"}`}
+              >
+                <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">
+                  {NUDGE_TYPE_LABELS[f.type] ?? f.type}
+                </div>
+                {isKilled ? (
+                  <div className="text-sm font-semibold text-otto-bear">✕ Disabled</div>
+                ) : f.sampleSize === 0 ? (
+                  <div className="text-sm text-otto-text-faint">Not enough data yet</div>
+                ) : (
+                  <div className={`tabular-nums text-sm font-semibold ${(f.avgAlphaPct ?? 0) >= 0 ? "text-otto-bull" : "text-otto-bear"}`}>
+                    {fmtPct(f.avgAlphaPct)} <span className="text-otto-text-faint">(n={f.sampleSize})</span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       {calls.length === 0 ? (
         <p className="otto-text-body mt-8 text-otto-text-muted">
           No calls logged yet — every fresh screener scan gets recorded here automatically.
@@ -126,6 +188,7 @@ export default async function ScreenerTrackRecordPage({
                 <th className="px-4 py-3 font-medium">Price found</th>
                 <th className="px-4 py-3 font-medium">Allocated</th>
                 <th className="px-4 py-3 font-medium">Peak since</th>
+                <th className="px-4 py-3 font-medium">Peak alpha</th>
                 <th className="px-4 py-3 font-medium">Current</th>
                 <th className="px-4 py-3 font-medium">Alpha vs SPY (live)</th>
                 <th className="px-4 py-3 font-medium">30d</th>
@@ -153,6 +216,17 @@ export default async function ScreenerTrackRecordPage({
                   <td className="px-4 py-3">
                     {fmtPrice(c.peakPrice)}
                     <span className="otto-text-caption ml-1 text-otto-text-faint">({fmtDate(c.peakAt)})</span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={c.peakAlphaPct >= 0 ? "text-otto-bull" : "text-otto-bear"}>{fmtPct(c.peakAlphaPct)}</span>
+                    {isRecentAlphaHigh(c) && (
+                      <span
+                        className="ml-1.5 inline-block rounded-full border border-otto-gold/50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-otto-gold"
+                        title={`New alpha high set ${fmtDate(c.peakAlphaAt)} and still holding`}
+                      >
+                        🔥 climbing
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3">{fmtPrice(c.live?.price)}</td>
                   <td className={`px-4 py-3 ${c.live && c.live.alphaPct >= 0 ? "text-otto-bull" : "text-otto-bear"}`}>

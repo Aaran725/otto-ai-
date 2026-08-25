@@ -22,11 +22,27 @@ import type { ProgressFn } from "./chat-types";
 import type { ScreenQueryRequirements } from "./screen-query";
 import { computeValueScore } from "./value-score";
 import { computeForecastTargets } from "./forecast";
-import { logScreenerCall } from "./screener-track-record";
+import { logScreenerCall, getKilledFactors } from "./screener-track-record";
 
 export type ScreenIntent = "undervalued" | "momentum" | "best" | "quality" | "avoid" | "contrarian";
 
+// Fixed, stable machine keys — the human-readable label text is
+// interpolated per pick (real percentiles, real percentages) and can't be
+// used to group "the same factor" across different picks. type is what
+// getFactorContributions (screener-track-record.ts) actually groups and
+// measures real historical contribution by.
+export type NudgeType =
+  | "cluster"
+  | "insider"
+  | "officerBuying"
+  | "ratingTrend"
+  | "sectorValuation"
+  | "forecastUpside"
+  | "earnings"
+  | "shortInterest";
+
 export interface ScreenerWhyNudge {
+  type: NudgeType;
   label: string; // e.g. "Insider buying (90d)", "Sector valuation (12th percentile vs peers)"
   points: number; // signed contribution to the final score, e.g. +4, -3
 }
@@ -664,9 +680,16 @@ export async function runScreener(
     // default 100) — the default window is plenty for a nudge among an
     // already-built pool, but too narrow to reliably supply a whole screen
     // on its own.
-    const [macro, clusterFeed] = await Promise.all([
+    const [macro, clusterFeed, killedFactors] = await Promise.all([
       fetchMacroContext().catch(() => null),
       fetchInsiderClusterFeed(requireInsiderBuying ? 400 : 100).catch(() => [] as InsiderClusterEntry[]),
+      // Fail-fast kill switch (see screener-track-record.ts) — a factor
+      // that's been net-negative on real, evaluated outcomes for a full
+      // rolling quarter gets its nudge zeroed out here, automatically,
+      // without waiting for a scheduled review to notice. Fails open
+      // (empty set) on any error — a kill-switch-check hiccup must never
+      // silently disable real signal.
+      getKilledFactors().catch(() => new Set<NudgeType>()),
     ]);
     // Union the real insider-buying feed into the candidate pool itself —
     // otherwise a stock with genuine live insider buying could simply never
@@ -959,75 +982,67 @@ export async function runScreener(
     const FORECAST_UPSIDE_NUDGE_MAX = intent === "momentum" ? 16 : intent === "undervalued" ? 12 : intent === "best" ? 8 : 6; // scaled by upside%, capped at +/-50%
     const EARNINGS_NUDGE_MAX = 3; // scaled by beat/miss ratio over the last up-to-4 reported quarters
     const SHORT_INTEREST_NUDGE_MAX = 3; // high/rising short interest is a red flag regardless of intent
+    // Derives from buildWhyNudges (defined below) rather than recomputing
+    // the same nudges a second time — the two used to be independent,
+    // hand-synced implementations of the same math (a real drift risk,
+    // called out explicitly in an earlier comment), which would have made
+    // the fail-fast kill switch below unreliable: a factor disabled in one
+    // could still silently apply in the other. Now there's exactly one
+    // place a nudge is computed, so both are correct by construction.
     function rankKey(c: ScreenerCandidate): number {
-      let key = c.compositeScore + clusterNudgeFor(c.symbol);
-      if (c.insiderActivity?.direction === "buying") key += INSIDER_NUDGE;
-      else if (c.insiderActivity?.direction === "selling") key -= INSIDER_NUDGE;
-      if (c.insiderActivity?.hasCSuiteBuying) key += OFFICER_BUYING_NUDGE;
-      const trend = ratingTrendBySymbol.get(c.symbol);
-      if (trend?.direction === "improving") key += RATING_TREND_NUDGE;
-      else if (trend?.direction === "worsening") key -= RATING_TREND_NUDGE;
-      const percentile = sectorPercentileBySymbol.get(c.symbol);
-      if (percentile !== undefined) key += ((50 - percentile) / 50) * SECTOR_NUDGE_MAX;
-      if (c.forecastUpsidePct !== undefined) {
-        const clamped = Math.max(-50, Math.min(50, c.forecastUpsidePct));
-        key += (clamped / 50) * FORECAST_UPSIDE_NUDGE_MAX;
-      }
-      const earnings = earningsBySymbol.get(c.symbol);
-      if (earnings) {
-        const total = earnings.beatCount + earnings.missCount;
-        if (total > 0) key += ((earnings.beatCount - earnings.missCount) / total) * EARNINGS_NUDGE_MAX;
-      }
-      const shortInterest = shortInterestBySymbol.get(c.symbol);
-      if (shortInterest) {
-        // Real risk read, not a fabricated threshold: >5 days-to-cover is
-        // already a stretched short position by normal-liquidity standards,
-        // and short interest growing >10% since the prior settlement means
-        // bearish conviction is actively building, not just elevated.
-        let riskFlags = 0;
-        if (shortInterest.daysToCover > 5) riskFlags += 1;
-        if (shortInterest.daysToCover > 10) riskFlags += 1;
-        if (shortInterest.changePercent > 10) riskFlags += 1;
-        key -= (Math.min(riskFlags, 3) / 3) * SHORT_INTEREST_NUDGE_MAX;
-      }
-      return key;
+      return c.compositeScore + buildWhyNudges(c).reduce((sum, n) => sum + n.points, 0);
     }
 
-    // Mirrors rankKey's math exactly, but as individually labeled line
-    // items instead of one opaque sum — this is the actual "show your
-    // work" data: every real signal that moved the score, with its real
-    // point value, not just a vague "insider activity" badge. Only called
-    // for the final 5 (see buildWhyBreakdown below), never the wide pool.
+    // The single source of truth for every real-signal nudge — rankKey
+    // (below) derives its total from this instead of duplicating the same
+    // math a second time, which is also what makes the fail-fast kill
+    // switch automatically consistent between the two: a factor disabled
+    // here is disabled everywhere it's used, by construction, not by
+    // remembering to update two places in sync.
     function buildWhyNudges(c: ScreenerCandidate): ScreenerWhyNudge[] {
       const nudges: ScreenerWhyNudge[] = [];
       const cluster = clusterNudgeFor(c.symbol);
       if (cluster !== 0) {
-        nudges.push({ label: cluster > 0 ? "Market-wide insider buying cluster" : "Market-wide insider selling cluster", points: cluster });
+        nudges.push({
+          type: "cluster",
+          label: cluster > 0 ? "Market-wide insider buying cluster" : "Market-wide insider selling cluster",
+          points: cluster,
+        });
       }
-      if (c.insiderActivity?.direction === "buying") nudges.push({ label: "Insider buying (90d)", points: INSIDER_NUDGE });
-      else if (c.insiderActivity?.direction === "selling") nudges.push({ label: "Insider selling (90d)", points: -INSIDER_NUDGE });
+      if (c.insiderActivity?.direction === "buying") nudges.push({ type: "insider", label: "Insider buying (90d)", points: INSIDER_NUDGE });
+      else if (c.insiderActivity?.direction === "selling")
+        nudges.push({ type: "insider", label: "Insider selling (90d)", points: -INSIDER_NUDGE });
       if (c.insiderActivity?.hasCSuiteBuying) {
-        nudges.push({ label: `${c.insiderActivity.topOfficerTitle ?? "Officer"} buying with own money`, points: OFFICER_BUYING_NUDGE });
+        nudges.push({
+          type: "officerBuying",
+          label: `${c.insiderActivity.topOfficerTitle ?? "Officer"} buying with own money`,
+          points: OFFICER_BUYING_NUDGE,
+        });
       }
       const trend = ratingTrendBySymbol.get(c.symbol);
-      if (trend?.direction === "improving") nudges.push({ label: "Analyst ratings improving", points: RATING_TREND_NUDGE });
-      else if (trend?.direction === "worsening") nudges.push({ label: "Analyst ratings worsening", points: -RATING_TREND_NUDGE });
+      if (trend?.direction === "improving") nudges.push({ type: "ratingTrend", label: "Analyst ratings improving", points: RATING_TREND_NUDGE });
+      else if (trend?.direction === "worsening")
+        nudges.push({ type: "ratingTrend", label: "Analyst ratings worsening", points: -RATING_TREND_NUDGE });
       const percentile = sectorPercentileBySymbol.get(c.symbol);
       if (percentile !== undefined) {
         const points = ((50 - percentile) / 50) * SECTOR_NUDGE_MAX;
-        nudges.push({ label: `Sector valuation (${percentile.toFixed(0)}th percentile vs peers)`, points });
+        nudges.push({ type: "sectorValuation", label: `Sector valuation (${percentile.toFixed(0)}th percentile vs peers)`, points });
       }
       if (c.forecastUpsidePct !== undefined) {
         const clamped = Math.max(-50, Math.min(50, c.forecastUpsidePct));
         const points = (clamped / 50) * FORECAST_UPSIDE_NUDGE_MAX;
-        nudges.push({ label: `Forecast upside (${c.forecastUpsidePct >= 0 ? "+" : ""}${c.forecastUpsidePct.toFixed(0)}% to target)`, points });
+        nudges.push({
+          type: "forecastUpside",
+          label: `Forecast upside (${c.forecastUpsidePct >= 0 ? "+" : ""}${c.forecastUpsidePct.toFixed(0)}% to target)`,
+          points,
+        });
       }
       const earnings = earningsBySymbol.get(c.symbol);
       if (earnings) {
         const total = earnings.beatCount + earnings.missCount;
         if (total > 0) {
           const points = ((earnings.beatCount - earnings.missCount) / total) * EARNINGS_NUDGE_MAX;
-          nudges.push({ label: `Earnings track record (${earnings.beatCount} beat / ${earnings.missCount} miss)`, points });
+          nudges.push({ type: "earnings", label: `Earnings track record (${earnings.beatCount} beat / ${earnings.missCount} miss)`, points });
         }
       }
       const shortInterest = shortInterestBySymbol.get(c.symbol);
@@ -1038,10 +1053,16 @@ export async function runScreener(
         if (shortInterest.changePercent > 10) riskFlags += 1;
         if (riskFlags > 0) {
           const points = -(Math.min(riskFlags, 3) / 3) * SHORT_INTEREST_NUDGE_MAX;
-          nudges.push({ label: `Short interest risk (${shortInterest.daysToCover.toFixed(1)} days to cover)`, points });
+          nudges.push({ type: "shortInterest", label: `Short interest risk (${shortInterest.daysToCover.toFixed(1)} days to cover)`, points });
         }
       }
-      return nudges;
+      // Fail-fast kill switch: a factor net-negative on real evaluated
+      // outcomes for a full rolling quarter gets zeroed out here, not
+      // silently omitted — the audit trail should say WHY a signal that
+      // would normally apply didn't move the score, not just go quiet.
+      return nudges.map((n) =>
+        killedFactors.has(n.type) ? { ...n, points: 0, label: `${n.label} — disabled (net-negative real track record)` } : n
+      );
     }
 
     /**
@@ -1201,6 +1222,7 @@ export async function runScreener(
         price: c.price,
         compositeScore: c.compositeScore,
         isFlagship: i === 0,
+        nudges: c.whyBreakdown?.nudges ?? [],
       });
     }
 
