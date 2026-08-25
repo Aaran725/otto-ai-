@@ -81,3 +81,36 @@ export async function fetchAlpacaHistoricalMonthly(symbol: string): Promise<FmpH
     return [];
   }
 }
+
+export interface DailyPricePoint {
+  date: string;
+  price: number;
+}
+
+/**
+ * Daily-granularity closes, distinct from the monthly fetcher above (which
+ * SPY-vs-call-date tracking needs and shouldn't be disturbed). Correlation
+ * math between finalists needs real daily returns — 12 monthly points is far
+ * too coarse to compute a meaningful pairwise correlation. Same auth/error
+ * pattern as fetchAlpacaHistoricalMonthly, just a different timeframe and no
+ * 12-point cap.
+ */
+export async function fetchAlpacaHistoricalDaily(symbol: string, lookbackDays = 90): Promise<DailyPricePoint[]> {
+  const headers = getAlpacaHeaders();
+  if (!headers) return [];
+  try {
+    const end = new Date();
+    const start = new Date(end.getTime() - (lookbackDays + 10) * 24 * 60 * 60 * 1000);
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const url = `${ALPACA_BASE}/stocks/${encodeURIComponent(symbol)}/bars?timeframe=1Day&start=${fmt(start)}&end=${fmt(end)}&limit=${lookbackDays + 10}&feed=iex`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) return [];
+    const data = (await res.json()) as AlpacaBarsResponse;
+    return (data.bars ?? []).slice(-lookbackDays).map((b) => ({
+      date: b.t.slice(0, 10),
+      price: b.c,
+    }));
+  } catch {
+    return [];
+  }
+}

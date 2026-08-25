@@ -211,7 +211,13 @@ export default async function ScreenerTrackRecordPage({
                   <td className="px-4 py-3">{fmtPrice(c.priceAtCall)}</td>
                   <td className="px-4 py-3">
                     {fmtDollars(c.allocatedAmount)}
-                    {c.closed && <span className="otto-text-caption ml-1 text-otto-text-faint">(closed)</span>}
+                    {c.earlyExit ? (
+                      <span className="otto-text-caption ml-1 text-otto-bear" title={`Stopped out at ${fmtPct(c.earlyExit.stockReturnPct)} after ${Math.round(c.earlyExit.ageDays)}d`}>
+                        (stopped out)
+                      </span>
+                    ) : (
+                      c.closed && <span className="otto-text-caption ml-1 text-otto-text-faint">(closed)</span>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     {fmtPrice(c.peakPrice)}

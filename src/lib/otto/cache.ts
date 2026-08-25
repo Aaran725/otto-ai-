@@ -104,6 +104,7 @@ const globalForCache = globalThis as unknown as {
   __ottoShortInterestCache?: TtlCache<unknown>;
   __ottoSymbolScoreCache?: TtlCache<unknown>;
   __ottoFinnhubFundamentalsCache?: TtlCache<unknown>;
+  __ottoDailyPriceCache?: TtlCache<unknown>;
 };
 
 export function getFmpCache<T>(): TtlCache<T> {
@@ -198,6 +199,14 @@ export function getFinnhubFundamentalsCache<T>(): TtlCache<T> {
   // landing on the same warm instance).
   globalForCache.__ottoFinnhubFundamentalsCache ??= new TtlCache("finnhub-fundamentals", 30 * 60 * 1000); // 30 min
   return globalForCache.__ottoFinnhubFundamentalsCache as TtlCache<T>;
+}
+
+export function getDailyPriceCache<T>(): TtlCache<T> {
+  // Keyed by symbol — shared across every screen's correlation check within
+  // a 4h window, matching the screener cache's own lifetime, so repeated
+  // scans don't refetch the same ~10 finalist-candidates' daily bars.
+  globalForCache.__ottoDailyPriceCache ??= new TtlCache("daily-price", 4 * 60 * 60 * 1000); // 4 h
+  return globalForCache.__ottoDailyPriceCache as TtlCache<T>;
 }
 
 export function getPeerCache<T>(): TtlCache<T> {

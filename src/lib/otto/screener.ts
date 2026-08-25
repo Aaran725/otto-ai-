@@ -8,8 +8,11 @@ import {
 } from "./finnhub";
 import { fetchSecUniverse, fetchCikForSymbol, type UniverseEntry } from "./sec-universe";
 import { computeSnowflake, type OttoSnowflakeScores } from "./snowflake";
-import { getScreenerCache, getSymbolScoreCache } from "./cache";
+import { getScreenerCache, getSymbolScoreCache, getDailyPriceCache } from "./cache";
 import { mapWithConcurrency } from "./batch";
+import { fetchAlpacaHistoricalDaily, type DailyPricePoint } from "./alpaca";
+import { diversifySelection } from "./correlation";
+import { recordEvent } from "./observability";
 import { fetchInsiderActivity, type InsiderActivity } from "./insider";
 import { fetchInsiderClusterFeed, type InsiderClusterEntry } from "./insider-feed";
 import { fetchRiskFactorExcerpt } from "./sec-edgar";
@@ -652,6 +655,35 @@ function passesRequirements(snap: Pick<SymbolSnapshot, "ratios" | "keyMetrics">,
   return true;
 }
 
+// How many candidates beyond the ranked top 5 to fetch daily price history
+// for — gives diversifySelection real room to swap out a correlated pick
+// for a genuine replacement instead of only being able to shrink the list.
+const CORRELATION_CANDIDATE_POOL = 10;
+const CORRELATION_FETCH_CONCURRENCY = 5;
+
+/**
+ * Daily closes for the top-ranked candidates, used only for the pairwise
+ * correlation check right before finalists are locked in — never persisted
+ * per-candidate, this is transient, in-request selection logic. A symbol
+ * with no fetchable history degrades to an empty array, which
+ * diversifySelection already treats as "unknown, don't block" rather than
+ * "correlated" or "uncorrelated." If EVERY requested symbol comes back
+ * empty (a systemic outage, not one bad ticker), that's worth knowing about
+ * even though the screen itself still proceeds unaffected.
+ */
+async function fetchDailyPriceSeriesFor(symbols: string[]): Promise<Map<string, DailyPricePoint[]>> {
+  const cache = getDailyPriceCache<DailyPricePoint[]>();
+  const results = await mapWithConcurrency(symbols, CORRELATION_FETCH_CONCURRENCY, async (symbol) => {
+    const points = await cache.getOrSet(symbol, () => fetchAlpacaHistoricalDaily(symbol));
+    return [symbol, points] as const;
+  });
+  const nonEmpty = results.filter(([, points]) => points.length > 0).length;
+  if (symbols.length > 0 && nonEmpty === 0) {
+    recordEvent("correlation_data_missing", { requested: symbols.length });
+  }
+  return new Map(results);
+}
+
 export async function runScreener(
   intent: ScreenIntent,
   theme: ThemeFilter | null = null,
@@ -1155,7 +1187,11 @@ export async function runScreener(
         .filter((x) => Math.abs(x.divergence) >= MIN_DIVERGENCE)
         .sort((a, b) => Math.abs(b.divergence) - Math.abs(a.divergence));
       const divergenceBySymbol = new Map(withDivergence.map((x) => [x.c.symbol, x.divergence]));
-      const topByDivergence = withDivergence.slice(0, 5).map((x) => x.c);
+      const rankedByDivergence = withDivergence.map((x) => x.c);
+      const contrarianPriceSeries = await fetchDailyPriceSeriesFor(
+        rankedByDivergence.slice(0, CORRELATION_CANDIDATE_POOL).map((c) => c.symbol)
+      );
+      const topByDivergence = diversifySelection(rankedByDivergence, contrarianPriceSeries, 5);
       finalists = topByDivergence.map((c) => {
         const divergence = divergenceBySymbol.get(c.symbol)!;
         const direction = divergence > 0 ? "more bullish than" : "more bearish than";
@@ -1174,7 +1210,14 @@ export async function runScreener(
           if (a.thinCoverage !== b.thinCoverage) return a.thinCoverage ? 1 : -1;
           return ascending ? rankKey(a) - rankKey(b) : rankKey(b) - rankKey(a);
         });
-      const selectedFinalists = rankedFinalists.slice(0, 5);
+      // Correlation-aware selection: swap out a highly-correlated
+      // lower-ranked pick for the next-best uncorrelated candidate rather
+      // than just truncating — so the top 5 aren't secretly one
+      // concentrated bet wearing five different tickers. See correlation.ts.
+      const finalistPriceSeries = await fetchDailyPriceSeriesFor(
+        rankedFinalists.slice(0, CORRELATION_CANDIDATE_POOL).map((c) => c.symbol)
+      );
+      const selectedFinalists = diversifySelection(rankedFinalists, finalistPriceSeries, 5);
       // The displayed score must reflect the same real signals used to rank —
       // otherwise a stock can visibly carry an "insiders selling" flag while
       // still showing a 100/100 screen score, which reads as a contradiction

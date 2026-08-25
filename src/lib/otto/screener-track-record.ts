@@ -52,7 +52,7 @@ export interface ScreenerCallRecord {
   peakAlphaPct: number;
   peakAlphaAt: string;
   allocatedAmount: number; // simulated dollars staked at call time — see PORTFOLIO_* below
-  closed: boolean; // true once its d180 milestone has been evaluated and capital returned to cash
+  closed: boolean; // true once its d180 milestone has been evaluated OR it was stopped out early, and capital returned to cash
   isFlagship: boolean; // true only for the #1-ranked pick of its scan — see logScreenerCall
   // Which real-signal nudges fired for this pick and how many points each
   // contributed (type + points only, not the interpolated display label —
@@ -60,6 +60,20 @@ export interface ScreenerCallRecord {
   // something shown directly). See screener.ts's buildWhyNudges.
   nudges: { type: NudgeType; points: number }[];
   evaluations: Partial<Record<`d${Milestone}`, ScreenerCallEvaluation>>;
+  // Set only if the position was stopped out early (see STOP_LOSS_* below) —
+  // a distinct event from the scheduled 30/90/180 milestones, never folded
+  // into `evaluations.d30`, since an early exit at e.g. day 12 isn't a real
+  // d30 result. Optional: records logged before this field existed simply
+  // lack it (undefined), same graceful-degradation pattern as every other
+  // field added to this record over time — no backfill.
+  earlyExit?: {
+    triggeredAt: string;
+    ageDays: number;
+    price: number;
+    stockReturnPct: number;
+    spyReturnPct: number;
+    alphaPct: number;
+  };
 }
 
 // How long the daily peak sweep keeps checking a call — a bit past the
@@ -67,6 +81,21 @@ export interface ScreenerCallRecord {
 // happens at the milestones, peak is a supplementary "how high did it get"
 // figure, not something worth polling forever.
 const PEAK_TRACKING_WINDOW_DAYS = 200;
+
+// "Let winners run, cut losers fast" — the deliberate dual of peak-alpha
+// tracking above. Before this, every logged pick rode to its d180 milestone
+// no matter how badly it broke, which meant a real catastrophic loss just
+// sat locked in a position the record had already effectively judged, tying
+// up capital for months. A single-name (not market-relative) drawdown this
+// steep this early is treated as "this call was wrong," and the position is
+// closed for real, permanently locking in that loss rather than hoping for
+// a reversion — a deliberate risk-management tradeoff, not an oversight:
+// it will occasionally cut a stock that would have recovered, in exchange
+// for protecting the portfolio from unbounded single-name tail risk.
+// STOP_LOSS_MAX_AGE_DAYS is kept strictly less than MILESTONES[0]=30 so the
+// early-exit and d30-milestone logic can never race on the same day.
+const STOP_LOSS_THRESHOLD_PCT = -25;
+const STOP_LOSS_MAX_AGE_DAYS = 30;
 
 const recordKey = (id: string) => `${NAMESPACE}:call:${id}`;
 const cooldownKey = (intent: ScreenIntent, symbol: string) => `${NAMESPACE}:cooldown:${intent}:${symbol}`;
@@ -392,13 +421,16 @@ export async function getFlagshipSummary(): Promise<FlagshipSummary> {
  * that fully reverted before the next sweep, but both correctly capture
  * any peak that held through at least one daily check. Neither ever
  * lowers — a peak, once real, stays on the record even after the price or
- * alpha comes back down.
+ * alpha comes back down. This same sweep is also where the early stop-loss
+ * check fires (see STOP_LOSS_* above) — it's already fetching today's real
+ * price and SPY-relative numbers for every active call, so checking for a
+ * catastrophic break is a natural extension, not a second fetch pass.
  */
-export async function updateDailyPeaks(): Promise<{ updated: number; alphaHighs: number; checked: number }> {
+export async function updateDailyPeaks(): Promise<{ updated: number; alphaHighs: number; earlyExits: number; checked: number }> {
   const calls = await getAllScreenerCalls();
   const now = Date.now();
   const active = calls.filter((c) => (now - new Date(c.calledAt).getTime()) / MS_PER_DAY <= PEAK_TRACKING_WINDOW_DAYS);
-  if (active.length === 0) return { updated: 0, alphaHighs: 0, checked: calls.length };
+  if (active.length === 0) return { updated: 0, alphaHighs: 0, earlyExits: 0, checked: calls.length };
 
   // A new PRICE high isn't automatically a new ALPHA high — SPY could have
   // moved just as much over the same window — so alpha needs its own real
@@ -412,6 +444,7 @@ export async function updateDailyPeaks(): Promise<{ updated: number; alphaHighs:
 
   let updated = 0;
   let alphaHighs = 0;
+  let earlyExits = 0;
   for (const call of active) {
     try {
       const quote = await fetchFinnhubQuote(call.symbol).catch(() => null);
@@ -431,6 +464,9 @@ export async function updateDailyPeaks(): Promise<{ updated: number; alphaHighs:
       let peakAlphaPct = call.peakAlphaPct;
       let peakAlphaAt = call.peakAlphaAt;
       let alphaChanged = false;
+      let earlyExit: ScreenerCallRecord["earlyExit"] | undefined;
+      let closed = call.closed;
+      let cashCredit = 0;
       const spyAtCall = nearestPrice(spyHistory, call.calledAt);
       if (spyAtCall !== null && spyCurrent !== null) {
         const stockReturnPct = ((currentPrice - call.priceAtCall) / call.priceAtCall) * 100;
@@ -441,17 +477,41 @@ export async function updateDailyPeaks(): Promise<{ updated: number; alphaHighs:
           peakAlphaAt = nowIso;
           alphaChanged = true;
         }
+
+        // Fail-fast on catastrophic single-name breaks — see STOP_LOSS_*
+        // comment above. Guarded so a call already closed (d180 or a prior
+        // early exit) is never re-triggered.
+        const ageDays = (now - new Date(call.calledAt).getTime()) / MS_PER_DAY;
+        if (!call.closed && !call.earlyExit && ageDays < STOP_LOSS_MAX_AGE_DAYS && stockReturnPct <= STOP_LOSS_THRESHOLD_PCT) {
+          earlyExit = { triggeredAt: nowIso, ageDays, price: currentPrice, stockReturnPct, spyReturnPct, alphaPct: currentAlphaPct };
+          closed = true;
+          cashCredit = call.allocatedAmount * (1 + stockReturnPct / 100);
+        }
       }
 
-      if (!priceChanged && !alphaChanged) continue;
-      await redis.set(recordKey(call.id), { ...call, peakPrice, peakAt, peakAlphaPct, peakAlphaAt });
+      if (!priceChanged && !alphaChanged && !earlyExit) continue;
+
+      if (earlyExit) {
+        const portfolio = await getPortfolio();
+        await redis.set(PORTFOLIO_KEY, { ...portfolio, cashAvailable: portfolio.cashAvailable + cashCredit });
+      }
+      await redis.set(recordKey(call.id), {
+        ...call,
+        peakPrice,
+        peakAt,
+        peakAlphaPct,
+        peakAlphaAt,
+        closed,
+        ...(earlyExit ? { earlyExit } : {}),
+      });
       if (priceChanged) updated += 1;
       if (alphaChanged) alphaHighs += 1;
+      if (earlyExit) earlyExits += 1;
     } catch {
       // one bad symbol shouldn't sink the whole sweep
     }
   }
-  return { updated, alphaHighs, checked: active.length };
+  return { updated, alphaHighs, earlyExits, checked: active.length };
 }
 
 /**

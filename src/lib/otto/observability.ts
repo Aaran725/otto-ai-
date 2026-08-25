@@ -19,7 +19,8 @@ export type MetricEvent =
   | "score_divergence" // screen score vs conviction score disagreed by >25 points
   | "finnhub_exhausted" // every Finnhub key failed for one request
   | "fmp_bundle_partial" // a single-stock bundle came back missing history/income/ratios
-  | "screener_zero_results"; // a screen returned nothing after all filters
+  | "screener_zero_results" // a screen returned nothing after all filters
+  | "correlation_data_missing"; // every symbol requested for the finalist correlation check came back empty
 
 const ALL_EVENTS: MetricEvent[] = [
   "data_quality_insufficient",
@@ -27,6 +28,7 @@ const ALL_EVENTS: MetricEvent[] = [
   "finnhub_exhausted",
   "fmp_bundle_partial",
   "screener_zero_results",
+  "correlation_data_missing",
 ];
 
 interface MetricSample {
