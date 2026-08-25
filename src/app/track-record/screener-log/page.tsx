@@ -6,6 +6,9 @@ import {
   getFactorContributions,
   getKilledFactors,
 } from "@/lib/otto/screener-track-record";
+import { ReturnGauge } from "@/components/otto/ReturnGauge";
+import { FactorAlphaBars, type FactorAlphaBarDatum } from "@/components/otto/FactorAlphaBars";
+import { PortfolioCompositionDonut, type CompositionDatum } from "@/components/otto/PortfolioCompositionDonut";
 
 const NUDGE_TYPE_LABELS: Record<string, string> = {
   cluster: "Insider cluster (market-wide)",
@@ -80,6 +83,19 @@ export default async function ScreenerTrackRecordPage({
   calls.sort((a, b) => new Date(b.calledAt).getTime() - new Date(a.calledAt).getTime());
   const flagshipAlpha = flagship.avgLiveAlphaPct ?? flagship.avgD30AlphaPct ?? flagship.avgD90AlphaPct ?? flagship.avgD180AlphaPct;
 
+  const openByIntent = new Map<string, number>();
+  for (const c of calls) {
+    if (c.closed) continue;
+    openByIntent.set(c.intent, (openByIntent.get(c.intent) ?? 0) + c.allocatedAmount);
+  }
+  const compositionData: CompositionDatum[] = [...openByIntent.entries()]
+    .filter(([, value]) => value > 0)
+    .map(([intent, value]) => ({ intent, value }));
+
+  const factorAlphaData: FactorAlphaBarDatum[] = factorContributions
+    .filter((f) => f.sampleSize > 0 && f.avgAlphaPct !== null && !killedFactors.has(f.type))
+    .map((f) => ({ type: f.type, label: NUDGE_TYPE_LABELS[f.type] ?? f.type, avgAlphaPct: f.avgAlphaPct!, sampleSize: f.sampleSize }));
+
   return (
     <div className="mx-auto min-h-screen max-w-6xl px-6 py-12 text-otto-text">
       <Link href="/" className="otto-text-caption text-otto-gold hover:opacity-80">
@@ -122,6 +138,21 @@ export default async function ScreenerTrackRecordPage({
         rule set would be worth today.
       </p>
 
+      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-4">
+          <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">
+            $10k stake vs. breakeven
+          </div>
+          <ReturnGauge totalValue={portfolio.totalValue} startingCash={portfolio.startingCash} totalReturnPct={portfolio.totalReturnPct} />
+        </div>
+        <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-4">
+          <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">
+            Open capital by intent
+          </div>
+          <PortfolioCompositionDonut data={compositionData} />
+        </div>
+      </div>
+
       <div className="mt-4 flex items-center gap-4 rounded-xl border border-otto-gold/30 bg-otto-gold/[0.04] p-3">
         <span className="otto-text-caption shrink-0 text-[10px] font-semibold uppercase tracking-wide text-otto-gold">
           ★ Flagship
@@ -147,6 +178,11 @@ export default async function ScreenerTrackRecordPage({
           sample before it's eligible to be killed — with a brand-new record, most rows below will show &ldquo;not enough
           data yet,&rdquo; honestly, not a fake result.
         </p>
+        {factorAlphaData.length > 0 && (
+          <div className="mt-3 rounded-xl border border-otto-border-soft bg-white/[0.02] p-4">
+            <FactorAlphaBars data={factorAlphaData} />
+          </div>
+        )}
         <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
           {factorContributions.map((f) => {
             const isKilled = killedFactors.has(f.type);
