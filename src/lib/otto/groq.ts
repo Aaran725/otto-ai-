@@ -190,6 +190,19 @@ export async function runOttoAnalysis(
   return analysis;
 }
 
+/**
+ * Early invalidation for a real same-day catalyst — see the prewarm cron's
+ * catalyst-aware pass. The cache key is already date-scoped (rolls over on
+ * its own at UTC midnight), so this only ever matters for a catalyst that
+ * lands the SAME calendar day someone already has a cached read — without
+ * it, that stale read would otherwise survive until the date rolls over,
+ * not until the real 24h TTL.
+ */
+export async function invalidateTodaysAnalysis(ticker: string): Promise<void> {
+  const cacheKey = `${ticker}:${new Date().toISOString().slice(0, 10)}`;
+  await getAnalysisCache<OttoAnalysis>().del(cacheKey);
+}
+
 const AXIS_LABELS: Record<keyof OttoSnowflakeScores, string> = {
   valuation: "valuation",
   growth: "growth",

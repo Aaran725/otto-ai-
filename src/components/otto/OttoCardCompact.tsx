@@ -27,13 +27,18 @@ export function OttoCardCompact({
   onExpand,
   watched,
   onToggleWatch,
+  onCompare,
 }: {
   analysis: OttoAnalysis;
   onExpand: () => void;
   watched?: boolean;
   onToggleWatch?: () => void;
+  onCompare?: (symbols: string[]) => void;
 }) {
   const positive = analysis.priceChangePercent1D >= 0;
+  // Real sector peers, already fetched for the valuation percentile — free
+  // to surface as one-click comparison suggestions, no new data needed.
+  const suggestedPeers = analysis.peerValuation?.peers.slice(0, 2).map((p) => p.symbol) ?? [];
 
   return (
     <div
@@ -97,6 +102,17 @@ export function OttoCardCompact({
           View full research →
         </span>
       </button>
+      {onCompare && suggestedPeers.length > 0 && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onCompare([analysis.ticker, ...suggestedPeers]);
+          }}
+          className="otto-text-caption mt-3 inline-block rounded-full border border-otto-border px-2.5 py-1 text-otto-text-muted transition-colors hover:border-otto-gold/50 hover:text-otto-gold"
+        >
+          Compare with {suggestedPeers.join(", ")} →
+        </button>
+      )}
       <Disclaimer className="mt-2" />
     </div>
   );

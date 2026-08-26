@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { fetchSecUniverse, fetchSicCode } from "@/lib/otto/sec-universe";
 import { getSymbolSnapshot } from "@/lib/otto/screener";
 import { mapWithConcurrency } from "@/lib/otto/batch";
+import { fetchInsiderClusterFeed } from "@/lib/otto/insider-feed";
+import { invalidateTodaysAnalysis } from "@/lib/otto/groq";
 
 /**
  * Daily cron target (see vercel.json) — quietly refreshes the per-symbol
@@ -48,9 +50,22 @@ export async function GET(request: Request) {
   if (batch.length < SNAPSHOT_BATCH) batch = [...batch, ...universe.slice(0, SNAPSHOT_BATCH - batch.length)];
   const sicBatch = batch.slice(0, SIC_BATCH);
 
+  // Catalyst-aware early cache invalidation — "accelerate" only in a real,
+  // honestly-scoped sense given Vercel Hobby's one-run-a-day cron limit:
+  // a single-stock analysis is cached under a date-scoped key that already
+  // rolls over on its own at UTC midnight, so this only ever matters for a
+  // real insider-buying/selling catalyst that lands the SAME calendar day
+  // someone already has a cached read of that symbol — without this, that
+  // stale read would sit there until the date rolls over, not until a real
+  // catalyst actually happened. Reuses the market-wide cluster feed already
+  // built for the screener (no new SEC/Finnhub cost), so this is free.
+  const clusterFeed = await fetchInsiderClusterFeed().catch(() => []);
+  const catalystSymbols = clusterFeed.filter((e) => e.buys !== e.sells).map((e) => e.symbol);
+
   const [snapshotResults, sicResults] = await Promise.all([
     mapWithConcurrency(batch, CONCURRENCY, async (c) => getSymbolSnapshot(c.symbol).catch(() => null)),
     mapWithConcurrency(sicBatch, CONCURRENCY, async (c) => fetchSicCode(c.symbol).catch(() => null)),
+    mapWithConcurrency(catalystSymbols, CONCURRENCY, async (symbol) => invalidateTodaysAnalysis(symbol).catch(() => null)),
   ]);
 
   return NextResponse.json({
@@ -58,6 +73,7 @@ export async function GET(request: Request) {
       snapshots: snapshotResults.filter((r) => r !== null).length,
       sic: sicResults.filter((r) => r !== null).length,
     },
+    invalidated: catalystSymbols.length,
     batchSize: batch.length,
     universeSize: universe.length,
   });

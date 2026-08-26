@@ -12,6 +12,7 @@ import { FollowUpVisualCard } from "./FollowUpVisualCard";
 import { ScreenerResultsCard } from "./ScreenerResultsCard";
 import { ComparisonCard } from "./ComparisonCard";
 import { WhatChangedBanner } from "./WhatChangedBanner";
+import { ProvisionalCard } from "./ProvisionalCard";
 import { PresetMenu } from "./PresetMenu";
 import { TrackRecordPanel } from "./TrackRecordPanel";
 import { PortfolioPanel } from "./PortfolioPanel";
@@ -63,6 +64,7 @@ export function ChatApp() {
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
   const [statusTrace, setStatusTrace] = useState<ProgressUpdate[]>([]);
+  const [provisional, setProvisional] = useState<LoggedCall | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [callLog, setCallLog] = useState<LoggedCall[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
@@ -120,6 +122,15 @@ export function ChatApp() {
     setInput("");
     setPending(true);
     setStatusTrace([]);
+    // A word-boundary match against the call log's own symbols — cheap,
+    // client-side, no guess at what the server will actually resolve.
+    // False negatives (a real ticker just never searched before) just mean
+    // no provisional card shows, same as today; a stray word coincidentally
+    // matching a past symbol is harmless too, since it only ever renders a
+    // clearly-labeled "last checked" placeholder that gets replaced the
+    // moment the real response lands, never treated as the real answer.
+    const priorMatch = callLog.find((c) => new RegExp(`\\b${c.symbol}\\b`, "i").test(trimmed)) ?? null;
+    setProvisional(priorMatch);
     scrollToBottom();
 
     try {
@@ -239,6 +250,7 @@ export function ChatApp() {
     } finally {
       setPending(false);
       setStatusTrace([]);
+      setProvisional(null);
       scrollToBottom();
     }
   }
@@ -344,6 +356,7 @@ export function ChatApp() {
                             onExpand={() => setExpandedId(m.id)}
                             watched={watchlist.some((w) => w.symbol === m.card!.ticker)}
                             onToggleWatch={() => toggleWatch(m.card!)}
+                            onCompare={(symbols) => send(symbols.join(" "))}
                           />
                         )}
                       </>
@@ -374,6 +387,11 @@ export function ChatApp() {
                 )}
               </div>
             ))}
+            {pending && provisional && (
+              <div className="otto-arrive flex justify-start">
+                <ProvisionalCard prior={provisional} />
+              </div>
+            )}
             {pending && (
               <div className="otto-arrive otto-progress-rail flex flex-col gap-2">
                 {statusTrace.length === 0 ? (

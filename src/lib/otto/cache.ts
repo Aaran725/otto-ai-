@@ -64,6 +64,18 @@ class TtlCache<T> {
     }
   }
 
+  /** Explicit early invalidation — for when a cached result is known to be
+   * stale before its TTL says so (see the prewarm cron's catalyst-aware
+   * invalidation), not part of the normal get/set/getOrSet flow. */
+  async del(key: string): Promise<void> {
+    try {
+      await redis.del(this.fullKey(key));
+    } catch {
+      // Fail soft, same as everywhere else here — worst case the stale
+      // entry just survives until its TTL naturally expires.
+    }
+  }
+
   async getOrSet(key: string, fn: () => Promise<T>): Promise<T> {
     const cached = await this.get(key);
     if (cached !== undefined) return cached;
