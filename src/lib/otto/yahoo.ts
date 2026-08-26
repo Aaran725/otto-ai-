@@ -18,18 +18,26 @@ export async function fetchYahooHistoricalMonthly(symbol: string): Promise<FmpHi
     const data = await res.json();
     const result = data?.chart?.result?.[0];
     const timestamps: number[] | undefined = result?.timestamp;
-    const closes: (number | null)[] | undefined = result?.indicators?.quote?.[0]?.close;
+    const quote = result?.indicators?.quote?.[0];
+    const closes: (number | null)[] | undefined = quote?.close;
+    const opens: (number | null)[] | undefined = quote?.open;
+    const highs: (number | null)[] | undefined = quote?.high;
+    const lows: (number | null)[] | undefined = quote?.low;
     if (!timestamps || !closes) return [];
 
     const points: FmpHistoricalPricePoint[] = [];
     for (let i = 0; i < timestamps.length; i++) {
       const close = closes[i];
       if (close === null || close === undefined) continue;
+      const open = opens?.[i];
+      const high = highs?.[i];
+      const low = lows?.[i];
       points.push({
         symbol,
         date: new Date(timestamps[i] * 1000).toISOString().slice(0, 10),
         price: close,
         volume: 0,
+        ...(open != null && high != null && low != null ? { open, high, low } : {}),
       });
     }
     return points.slice(-12);

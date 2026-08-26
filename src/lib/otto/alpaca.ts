@@ -46,6 +46,9 @@ export async function fetchAlpacaSnapshot(symbol: string): Promise<AlpacaSnapsho
 
 interface AlpacaBar {
   c: number;
+  o: number;
+  h: number;
+  l: number;
   t: string; // ISO timestamp
 }
 
@@ -76,6 +79,9 @@ export async function fetchAlpacaHistoricalMonthly(symbol: string): Promise<FmpH
       date: b.t.slice(0, 10),
       price: b.c,
       volume: 0,
+      open: b.o,
+      high: b.h,
+      low: b.l,
     }));
   } catch {
     return [];

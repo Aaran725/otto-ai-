@@ -19,6 +19,12 @@ export interface HistoricalPoint {
   /** ISO date, e.g. "2025-08-01" */
   date: string;
   close: number;
+  /** Only present when the source bar carried real OHLC (Alpaca/Yahoo
+   * fallback paths) — FMP's primary "light" endpoint is close-only, so
+   * these are absent for most tickers. Never synthesized from close alone. */
+  open?: number;
+  high?: number;
+  low?: number;
 }
 
 export interface FundamentalTrendPoint {

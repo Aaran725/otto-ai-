@@ -471,7 +471,13 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       oneLiner,
       reconciliationNote,
       dataQuality,
-      historicalPrices: bundle.historicalMonthly.map((p) => ({ date: p.date, close: p.price })),
+      historicalPrices: bundle.historicalMonthly.map((p) => ({
+        date: p.date,
+        close: p.price,
+        ...(p.open !== undefined && p.high !== undefined && p.low !== undefined
+          ? { open: p.open, high: p.high, low: p.low }
+          : {}),
+      })),
       fundamentalTrend: bundle.income.map((inc, i) => ({
         period: `FY${inc.fiscalYear}`,
         revenue: inc.revenue,

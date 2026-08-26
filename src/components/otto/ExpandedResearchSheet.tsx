@@ -17,6 +17,7 @@ import { RatingDonut } from "./RatingDonut";
 import { RevenueMarginChart } from "./RevenueMarginChart";
 import { CashFlowWaterfall } from "./CashFlowWaterfall";
 import { InsiderTimeline } from "./InsiderTimeline";
+import { CandlestickChart } from "./CandlestickChart";
 import { useGlassPointer } from "./useGlassPointer";
 
 const TABS = ["Overview", "Financials", "Snowflake", "Forecast", "Catalysts"] as const;
@@ -125,6 +126,12 @@ export function ExpandedResearchSheet({
               </div>
               <ConvictionGauge score={analysis.convictionScore} dataQuality={analysis.dataQuality} />
             </div>
+            {analysis.historicalPrices.some((p) => p.open !== undefined) && (
+              <div>
+                <p className="otto-text-label mb-2 text-otto-text-faint">Recent Candles</p>
+                <CandlestickChart data={analysis.historicalPrices} />
+              </div>
+            )}
             <p className="otto-text-body text-otto-text-muted">{analysis.synthesis}</p>
             {analysis.reconciliationNote && (
               <div className="rounded-lg border border-otto-gold/25 bg-otto-gold-soft px-4 py-3 text-xs text-otto-text-muted">

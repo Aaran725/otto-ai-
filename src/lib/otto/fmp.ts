@@ -194,6 +194,11 @@ export interface FmpHistoricalPricePoint {
   date: string;
   price: number;
   volume: number;
+  /** Only populated by the Alpaca/Yahoo fallback paths, which carry real
+   * OHLC bars — FMP's "light" endpoint (the primary source) is close-only. */
+  open?: number;
+  high?: number;
+  low?: number;
 }
 
 export interface FmpIncomeStatement {
