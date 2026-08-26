@@ -1,7 +1,8 @@
 "use client";
 
-import { useRef } from "react";
 import { clsx } from "clsx";
+import { useGlassPointer } from "./useGlassPointer";
+import { useScrollReveal } from "./useScrollReveal";
 
 const CAPABILITIES = ["Real filings", "Live market data", "Deterministic scoring", "Any ticker", "Free"];
 
@@ -13,22 +14,6 @@ const FACTS = [
   { value: "Real", label: "SEC filings cited" },
   { value: "0", label: "fabricated numbers" },
 ];
-
-/** Pointer-reactive Liquid Glass — moves the highlight in .otto-glass via
- * CSS custom properties instead of a static gradient position. */
-function useGlassPointer() {
-  const ref = useRef<HTMLDivElement>(null);
-  return {
-    ref,
-    onMouseMove: (e: React.MouseEvent<HTMLDivElement>) => {
-      const el = ref.current;
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
-      el.style.setProperty("--mx", `${((e.clientX - rect.left) / rect.width) * 100}%`);
-      el.style.setProperty("--my", `${((e.clientY - rect.top) / rect.height) * 100}%`);
-    },
-  };
-}
 
 /**
  * The landing moment — what a visitor sees before their first message.
@@ -42,6 +27,8 @@ function useGlassPointer() {
 export function LandingHero({ onStart, onExample }: { onStart: () => void; onExample: (text: string) => void }) {
   const mockGlass = useGlassPointer();
   const navGlass = useGlassPointer();
+  const trustReveal = useScrollReveal<HTMLDivElement>();
+  const statsReveal = useScrollReveal<HTMLDivElement>();
 
   return (
     <div className="relative flex h-full flex-col items-center overflow-y-auto px-4 pb-32 pt-24 sm:px-6">
@@ -130,8 +117,17 @@ export function LandingHero({ onStart, onExample }: { onStart: () => void; onExa
         </div>
       </div>
 
-      {/* Trust strip — real data sources, never a fabricated testimonial */}
-      <div className="otto-liquid-in relative z-10 mt-16 flex flex-col items-center gap-3" style={{ animationDelay: "200ms" }}>
+      {/* Trust strip — real data sources, never a fabricated testimonial.
+          Scroll-triggered (useScrollReveal) rather than load-triggered, so
+          it still "arrives" if you scroll to it instead of having already
+          settled before the fold. */}
+      <div
+        ref={trustReveal.ref}
+        className={clsx(
+          "otto-reveal relative z-10 mt-16 flex flex-col items-center gap-3",
+          trustReveal.visible && "otto-reveal-visible"
+        )}
+      >
         <p className="otto-text-caption text-otto-text-faint">Real data, every time — pulled live from</p>
         <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
           {DATA_SOURCES.map((s) => (
@@ -144,8 +140,12 @@ export function LandingHero({ onStart, onExample }: { onStart: () => void; onExa
 
       {/* Stats — mechanism facts, not invented usage numbers */}
       <div
-        className="otto-liquid-in relative z-10 mt-12 grid w-full max-w-3xl grid-cols-2 gap-6 sm:grid-cols-4"
-        style={{ animationDelay: "260ms" }}
+        ref={statsReveal.ref}
+        className={clsx(
+          "otto-reveal relative z-10 mt-12 grid w-full max-w-3xl grid-cols-2 gap-6 sm:grid-cols-4",
+          statsReveal.visible && "otto-reveal-visible"
+        )}
+        style={{ transitionDelay: statsReveal.visible ? "80ms" : "0ms" }}
       >
         {FACTS.map((f) => (
           <div key={f.label} className="flex flex-col items-center text-center">

@@ -388,6 +388,101 @@ button:active {
   }
 }
 
+/* Scroll reveal — the same liquid arrival, but triggered by an
+   IntersectionObserver (useScrollReveal) instead of firing once on mount,
+   so below-the-fold content still "arrives" the moment you scroll to it. */
+.otto-reveal {
+  opacity: 0;
+  transform: scale(0.92) translateY(28px);
+  filter: blur(10px);
+  transition: opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1), transform 0.9s cubic-bezier(0.22, 1, 0.36, 1),
+    filter 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.otto-reveal-visible {
+  opacity: 1;
+  transform: scale(1) translateY(0);
+  filter: blur(0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .otto-reveal,
+  .otto-reveal-visible {
+    opacity: 1;
+    transform: none;
+    filter: none;
+    transition: none;
+  }
+}
+
+/* Apple-Intelligence-style glow border — a rotating conic gradient ring,
+   masked down to just the border width, for the moments a user watches
+   most closely (an active input, Otto actively working). */
+@keyframes otto-glow-rotate {
+  to {
+    transform: rotate(1turn);
+  }
+}
+.otto-glow-border {
+  position: relative;
+  isolation: isolate;
+}
+.otto-glow-border::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  z-index: -1;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(from 0deg, var(--otto-gold), #a78bfa, var(--otto-bull), var(--otto-gold));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  filter: drop-shadow(0 0 6px rgba(167, 139, 250, 0.55));
+  animation: otto-glow-rotate 3s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .otto-glow-border::before {
+    animation: none;
+  }
+}
+
+/* Colored bloom behind a conviction score — turns flat text into a real
+   focal point. Color is set per-use via the --halo-color custom property
+   so it always matches the same verdict color the number is rendered in. */
+@keyframes otto-halo-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 0.75;
+    transform: scale(1.1);
+  }
+}
+.otto-score-halo {
+  position: relative;
+  display: inline-block;
+  isolation: isolate;
+}
+.otto-score-halo::before {
+  content: "";
+  position: absolute;
+  inset: -55%;
+  z-index: -1;
+  border-radius: 999px;
+  background: radial-gradient(circle, var(--halo-color, var(--otto-gold)) 0%, transparent 70%);
+  filter: blur(14px);
+  opacity: 0.55;
+  animation: otto-halo-pulse 2.6s ease-in-out infinite;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .otto-score-halo::before {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
 /* Depth grid — a faint dot-grid layer beneath the ambient light field, the
    kind of subtle texture that keeps a dark hero from reading as flat.
    Static (no animation) so it doesn't compete with the ambient drift

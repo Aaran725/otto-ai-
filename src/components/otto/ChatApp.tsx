@@ -71,6 +71,7 @@ export function ChatApp() {
   const [panel, setPanel] = useState<"track-record" | "watchlist" | null>(null);
   const [scrolled, setScrolled] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const { user, loading: authLoading, signOut } = useAuth();
@@ -393,39 +394,41 @@ export function ChatApp() {
               </div>
             )}
             {pending && (
-              <div className="otto-arrive otto-progress-rail flex flex-col gap-2">
-                {statusTrace.length === 0 ? (
-                  <div className="flex items-center gap-1.5 text-otto-text-faint">
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:150ms]" />
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:300ms]" />
-                  </div>
-                ) : (
-                  statusTrace.map((stage, i) => {
-                    // A stage that tracks its own finding only settles once
-                    // that finding actually lands (genuinely parallel work —
-                    // several can be "still in flight" at once). A plain
-                    // sequential stage (no finding ever coming) falls back to
-                    // "settled once a later stage exists," same as before.
-                    const settled = stage.finding !== undefined || (!stage.tracksFinding && i < statusTrace.length - 1);
-                    return (
-                      <div key={stage.id} className="flex flex-col gap-0.5">
-                        <div
-                          className={clsx(
-                            "otto-arrive flex items-center gap-2 text-xs",
-                            settled ? "text-otto-text-faint" : "text-otto-text-muted"
+              <div className="otto-arrive otto-glow-border otto-material rounded-2xl border border-otto-border-soft p-4">
+                <div className="otto-progress-rail flex flex-col gap-2">
+                  {statusTrace.length === 0 ? (
+                    <div className="flex items-center gap-1.5 text-otto-text-faint">
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:150ms]" />
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:300ms]" />
+                    </div>
+                  ) : (
+                    statusTrace.map((stage, i) => {
+                      // A stage that tracks its own finding only settles once
+                      // that finding actually lands (genuinely parallel work —
+                      // several can be "still in flight" at once). A plain
+                      // sequential stage (no finding ever coming) falls back to
+                      // "settled once a later stage exists," same as before.
+                      const settled = stage.finding !== undefined || (!stage.tracksFinding && i < statusTrace.length - 1);
+                      return (
+                        <div key={stage.id} className="flex flex-col gap-0.5">
+                          <div
+                            className={clsx(
+                              "otto-arrive flex items-center gap-2 text-xs",
+                              settled ? "text-otto-text-faint" : "text-otto-text-muted"
+                            )}
+                          >
+                            <StageBadge icon={stage.icon} settled={settled} />
+                            <span className={settled ? "line-through decoration-otto-text-faint/50" : ""}>{stage.text}</span>
+                          </div>
+                          {stage.finding && (
+                            <span className="otto-finding-flash otto-text-caption pl-5 text-otto-bull">✓ {stage.finding}</span>
                           )}
-                        >
-                          <StageBadge icon={stage.icon} settled={settled} />
-                          <span className={settled ? "line-through decoration-otto-text-faint/50" : ""}>{stage.text}</span>
                         </div>
-                        {stage.finding && (
-                          <span className="otto-finding-flash otto-text-caption pl-5 text-otto-bull">✓ {stage.finding}</span>
-                        )}
-                      </div>
-                    );
-                  })
-                )}
+                      );
+                    })
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -439,13 +442,18 @@ export function ChatApp() {
               e.preventDefault();
               send(input);
             }}
-            className="flex items-center gap-2 rounded-full border border-otto-border bg-otto-bg-raised px-3 py-2.5"
+            className={clsx(
+              "flex items-center gap-2 rounded-full border border-otto-border bg-otto-bg-raised px-3 py-2.5",
+              (pending || inputFocused) && "otto-glow-border"
+            )}
           >
             <PresetMenu disabled={pending} onSelect={(query) => send(query)} />
             <input
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onFocus={() => setInputFocused(true)}
+              onBlur={() => setInputFocused(false)}
               placeholder="Ask Otto about a stock…"
               className="flex-1 bg-transparent text-sm text-otto-text placeholder:text-otto-text-faint focus:outline-none"
               autoFocus

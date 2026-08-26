@@ -17,6 +17,7 @@ import { RatingDonut } from "./RatingDonut";
 import { RevenueMarginChart } from "./RevenueMarginChart";
 import { CashFlowWaterfall } from "./CashFlowWaterfall";
 import { InsiderTimeline } from "./InsiderTimeline";
+import { useGlassPointer } from "./useGlassPointer";
 
 const TABS = ["Overview", "Financials", "Snowflake", "Forecast", "Catalysts"] as const;
 type Tab = (typeof TABS)[number];
@@ -42,10 +43,15 @@ export function ExpandedResearchSheet({
 }) {
   const [tab, setTab] = useState<Tab>("Overview");
   const positive = analysis.priceChangePercent1D >= 0;
+  const glass = useGlassPointer<HTMLDivElement>();
 
   return (
-    <div className="otto-expand otto-material-thick otto-elevation-floating w-full max-w-2xl overflow-hidden rounded-2xl border">
-      <div className="flex items-start justify-between gap-4 p-5 pb-0">
+    <div
+      ref={glass.ref}
+      onMouseMove={glass.onMouseMove}
+      className="otto-expand otto-glass otto-material-thick otto-elevation-floating w-full max-w-2xl overflow-hidden rounded-2xl border"
+    >
+      <div className="relative z-10 flex items-start justify-between gap-4 p-5 pb-0">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <h2 className="otto-text-title text-otto-text">{analysis.ticker}</h2>
@@ -83,7 +89,7 @@ export function ExpandedResearchSheet({
         </div>
       </div>
 
-      <div className="otto-segmented mx-5 mt-4">
+      <div className="otto-segmented relative z-10 mx-5 mt-4">
         <div
           className="otto-segmented-thumb"
           style={{ left: `${(TABS.indexOf(tab) / TABS.length) * 100}%`, width: `${100 / TABS.length}%` }}
@@ -102,7 +108,7 @@ export function ExpandedResearchSheet({
         ))}
       </div>
 
-      <div className="p-5">
+      <div className="relative z-10 p-5">
         {tab === "Overview" && (
           <div className="flex flex-col gap-5">
             <div className="flex items-start justify-between gap-4">
@@ -223,7 +229,7 @@ export function ExpandedResearchSheet({
         )}
       </div>
 
-      <Disclaimer className="px-5 pb-5" />
+      <Disclaimer className="relative z-10 px-5 pb-5" />
     </div>
   );
 }
