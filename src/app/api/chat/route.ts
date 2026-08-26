@@ -1,6 +1,6 @@
 import { fetchStockBundle } from "@/lib/otto/fmp";
 import { runOttoAnalysis, runOttoFollowUp } from "@/lib/otto/groq";
-import { resolveExplicitTicker, resolveTickerByFuzzyName, type ResolvedTicker } from "@/lib/otto/resolve-ticker";
+import { resolveExplicitTickers, resolveTickerByFuzzyName, type ResolvedTicker } from "@/lib/otto/resolve-ticker";
 import { looksLikeFreshRequest, detectFollowUpTopic, buildFollowUpVisual } from "@/lib/otto/followup-intent";
 import { detectScreenIntent, detectThemeFilter, detectCapFilter, intentLabel, runScreener, type CapFilter } from "@/lib/otto/screener";
 import { interpretScreenQuery, themeQueryToFilter, verifySeedTickers } from "@/lib/otto/screen-query";
@@ -81,6 +81,37 @@ export async function POST(request: Request) {
           closeOnce();
         }
 
+        // 2-3 explicit tickers named together ("PLTR or PATH", "compare
+        // NVDA and AMD") is already an unambiguous, low-false-positive
+        // signal on its own — no connector word required — since
+        // extractExplicitCandidates only trusts $-prefixed or literal
+        // all-caps tokens, the same strict standard the single-ticker path
+        // already relies on. Each analysis is the exact same cached,
+        // independently-verified pipeline as a normal search, just run in
+        // parallel and rendered as one comparative view instead of 2-3
+        // separate messages.
+        async function runComparison(resolvedTickers: ResolvedTicker[]) {
+          send({
+            type: "status",
+            id: "compare",
+            text: `Comparing ${resolvedTickers.map((t) => t.symbol).join(", ")}…`,
+            icon: "otto",
+          });
+          const analyses = await Promise.all(
+            resolvedTickers.map(async (resolved) => {
+              const bundle = await fetchStockBundle(resolved.symbol);
+              return runOttoAnalysis(resolved.symbol, bundle);
+            })
+          );
+          const symbolList = analyses.map((a) => a.ticker).join(" vs. ");
+          send({
+            type: "done",
+            reply: `Here's how ${symbolList} stack up side by side.`,
+            comparison: { tickers: analyses },
+          });
+          closeOnce();
+        }
+
         // A ticker mentioned in a question about the stock we're already
         // discussing ("what's your forecast for UBER") is a follow-up, not a
         // request to regenerate the card — only re-run the full pipeline when
@@ -89,7 +120,12 @@ export async function POST(request: Request) {
         // literal ALL-CAPS token the user typed) are trusted immediately —
         // unambiguous, unlike the fuzzy whole-message company-name match
         // below, which needs a screen-request check to run first.
-        const explicitTicker = await resolveExplicitTicker(message);
+        const explicitTickers = await resolveExplicitTickers(message);
+        if (explicitTickers.length >= 2) {
+          await runComparison(explicitTickers);
+          return;
+        }
+        const explicitTicker = explicitTickers[0] ?? null;
         if (explicitTicker) {
           const isNewTicker = explicitTicker.symbol !== lastCard?.ticker;
           if (isNewTicker || looksLikeFreshRequest(message)) {

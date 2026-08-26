@@ -43,6 +43,51 @@ export function extractExplicitCandidates(text: string): string[] {
 
 export interface ResolvedTicker extends FmpSearchResult {}
 
+// A comparison view needs at least 2 to mean anything and stays readable up
+// to 3 — capped here (not left open-ended) so one message naming a long run
+// of stray all-caps words can't fan out into a 10-way comparison nobody
+// asked for.
+const MAX_COMPARISON_TICKERS = 3;
+
+/**
+ * Like resolveExplicitTicker, but keeps resolving past the first hit instead
+ * of returning on it — resolveExplicitTicker collapses "compare NVDA and
+ * AMD" down to just NVDA, silently discarding AMD. This is what lets a
+ * multi-ticker message actually surface every real symbol it named, for
+ * comparison mode. Same trust model: only explicit ($TICKER or literal
+ * all-caps token) candidates, same FMP-then-Finnhub verification per
+ * candidate, no fuzzy matching.
+ */
+export async function resolveExplicitTickers(text: string, max = MAX_COMPARISON_TICKERS): Promise<ResolvedTicker[]> {
+  const explicit = extractExplicitCandidates(text);
+  const resolved: ResolvedTicker[] = [];
+  const seen = new Set<string>();
+
+  for (const candidate of explicit) {
+    if (resolved.length >= max) break;
+    const result = await searchTicker(candidate).catch(() => null);
+    if (result && result.symbol.replace(/\..*$/, "") === candidate && !seen.has(result.symbol)) {
+      seen.add(result.symbol);
+      resolved.push(result);
+    }
+  }
+  // Finnhub fallback only for candidates FMP couldn't resolve at all — same
+  // two-pass structure as resolveExplicitTicker, extended to keep collecting
+  // instead of stopping at the first success.
+  if (resolved.length < max) {
+    for (const candidate of explicit) {
+      if (resolved.length >= max) break;
+      if ([...seen].some((s) => s.replace(/\..*$/, "") === candidate)) continue;
+      const fallback = await resolveTickerViaFinnhub(candidate).catch(() => null);
+      if (fallback && !seen.has(fallback.symbol)) {
+        seen.add(fallback.symbol);
+        resolved.push(fallback);
+      }
+    }
+  }
+  return resolved;
+}
+
 /**
  * Only the unambiguous signals: a literal $TICKER or an all-caps token the
  * user actually typed. Safe to trust immediately, with no risk of a

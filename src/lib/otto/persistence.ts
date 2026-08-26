@@ -63,6 +63,17 @@ async function getUserId(): Promise<string | null> {
   return data.session?.user.id ?? null;
 }
 
+/** The most recent logged call for a symbol, if any — used to detect "what
+ * changed since you last looked" without any new storage: every fresh
+ * search already logs here unconditionally (see logCall below), so the
+ * memory this reads already exists, it just wasn't being surfaced. Callers
+ * must look this up BEFORE calling logCall for the current search, or
+ * "prior" will just be today's own entry. */
+export async function getPriorCall(symbol: string): Promise<LoggedCall | null> {
+  const log = await getCallLog();
+  return log.find((c) => c.symbol === symbol.toUpperCase()) ?? null;
+}
+
 export async function getCallLog(): Promise<LoggedCall[]> {
   const userId = await getUserId();
   if (!userId) return readJson<LoggedCall[]>(CALL_LOG_KEY, []);

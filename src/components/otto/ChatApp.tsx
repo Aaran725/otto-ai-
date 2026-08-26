@@ -10,6 +10,8 @@ import { SlideOver } from "./SlideOver";
 import { ExpandedResearchSheet } from "./ExpandedResearchSheet";
 import { FollowUpVisualCard } from "./FollowUpVisualCard";
 import { ScreenerResultsCard } from "./ScreenerResultsCard";
+import { ComparisonCard } from "./ComparisonCard";
+import { WhatChangedBanner } from "./WhatChangedBanner";
 import { PresetMenu } from "./PresetMenu";
 import { TrackRecordPanel } from "./TrackRecordPanel";
 import { PortfolioPanel } from "./PortfolioPanel";
@@ -19,6 +21,7 @@ import { useAuth } from "@/lib/supabase/auth-context";
 import {
   logCall,
   getCallLog,
+  getPriorCall,
   getWatchlist,
   isWatched,
   addToWatchlist,
@@ -26,6 +29,12 @@ import {
   type LoggedCall,
   type WatchlistEntry,
 } from "@/lib/otto/persistence";
+import type { WhatChanged } from "@/lib/otto/chat-types";
+
+// Below this, a re-search doesn't count as a real change worth interrupting
+// the user over — normal day-to-day conviction-score noise, not a genuine
+// verdict-relevant move.
+const MEANINGFUL_SCORE_DELTA = 8;
 
 function uid() {
   return Math.random().toString(36).slice(2);
@@ -162,7 +171,25 @@ export function ChatApp() {
 
       // Log every fresh analysis automatically — the track record has to be
       // the whole record, not a cherry-picked subset the user chose to save.
+      let whatChanged: WhatChanged | undefined;
       if (done.card) {
+        // Looked up BEFORE logCall, so "prior" is genuinely the last time
+        // this symbol was searched, not the entry about to be written for
+        // right now — this is the entire "standing watch" feature: the
+        // call log already remembers every search, this just diffs against
+        // that existing memory instead of adding new storage.
+        const prior = await getPriorCall(done.card.ticker);
+        if (prior) {
+          const scoreDelta = done.card.convictionScore - prior.convictionScore;
+          if (prior.verdict !== done.card.verdict || Math.abs(scoreDelta) >= MEANINGFUL_SCORE_DELTA) {
+            whatChanged = {
+              previousVerdict: prior.verdict,
+              previousScore: prior.convictionScore,
+              previousAt: prior.calledAt,
+              scoreDelta,
+            };
+          }
+        }
         await logCall({
           symbol: done.card.ticker,
           companyName: done.card.companyName,
@@ -171,6 +198,22 @@ export function ChatApp() {
           convictionScore: done.card.convictionScore,
           verdict: done.card.verdict,
         });
+        setCallLog(await getCallLog());
+      }
+
+      // A comparison is really 2-3 real searches run together — each one
+      // counts in the unfiltered record the same as a solo search would.
+      if (done.comparison) {
+        for (const analysis of done.comparison.tickers) {
+          await logCall({
+            symbol: analysis.ticker,
+            companyName: analysis.companyName,
+            calledAt: analysis.generatedAt,
+            calledPrice: analysis.price,
+            convictionScore: analysis.convictionScore,
+            verdict: analysis.verdict,
+          });
+        }
         setCallLog(await getCallLog());
       }
 
@@ -183,6 +226,8 @@ export function ChatApp() {
           card: done!.card,
           visual: done!.visual,
           screener: done!.screener,
+          comparison: done!.comparison,
+          whatChanged,
         },
       ]);
     } catch (err) {
@@ -284,21 +329,29 @@ export function ChatApp() {
                 ) : (
                   <div className="flex w-full flex-col gap-3">
                     {m.card ? (
-                      expandedId === m.id ? (
-                        <ExpandedResearchSheet
-                          analysis={m.card}
-                          onCollapse={() => setExpandedId(null)}
-                          watched={watchlist.some((w) => w.symbol === m.card!.ticker)}
-                          onToggleWatch={() => toggleWatch(m.card!)}
-                        />
-                      ) : (
-                        <OttoCardCompact
-                          analysis={m.card}
-                          onExpand={() => setExpandedId(m.id)}
-                          watched={watchlist.some((w) => w.symbol === m.card!.ticker)}
-                          onToggleWatch={() => toggleWatch(m.card!)}
-                        />
-                      )
+                      <>
+                        {m.whatChanged && <WhatChangedBanner whatChanged={m.whatChanged} />}
+                        {expandedId === m.id ? (
+                          <ExpandedResearchSheet
+                            analysis={m.card}
+                            onCollapse={() => setExpandedId(null)}
+                            watched={watchlist.some((w) => w.symbol === m.card!.ticker)}
+                            onToggleWatch={() => toggleWatch(m.card!)}
+                          />
+                        ) : (
+                          <OttoCardCompact
+                            analysis={m.card}
+                            onExpand={() => setExpandedId(m.id)}
+                            watched={watchlist.some((w) => w.symbol === m.card!.ticker)}
+                            onToggleWatch={() => toggleWatch(m.card!)}
+                          />
+                        )}
+                      </>
+                    ) : m.comparison ? (
+                      <>
+                        <p className="max-w-lg text-sm leading-relaxed text-otto-text">{m.text}</p>
+                        <ComparisonCard comparison={m.comparison} onSelect={(symbol) => send(symbol)} />
+                      </>
                     ) : (
                       <>
                         {m.visual?.type === "sparkline" ? (

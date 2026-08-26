@@ -61,6 +61,26 @@ export interface ScreenerResults {
   isAvoidList?: boolean; // inverts score coloring — a "least bad" score still isn't good
 }
 
+/** 2-3 full single-stock analyses run side by side from one message ("PLTR
+ * or PATH", "compare NVDA and AMD") — each entry is a real, independently
+ * cached OttoAnalysis (same pipeline as a single search), just rendered as
+ * one comparative view instead of 2-3 separate messages. */
+export interface ComparisonResult {
+  tickers: OttoAnalysis[];
+}
+
+/** Computed client-side (see ChatApp.tsx's send()) by diffing against the
+ * call log's own prior entry for this symbol — not part of the server
+ * response, since the server has no per-user call history to diff against.
+ * Only attached when the change is real: verdict flipped, or conviction
+ * moved by a meaningful amount, never on every re-search. */
+export interface WhatChanged {
+  previousVerdict: string;
+  previousScore: number;
+  previousAt: string; // ISO timestamp
+  scoreDelta: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -68,6 +88,8 @@ export interface ChatMessage {
   card?: OttoAnalysis;
   visual?: FollowUpVisual;
   screener?: ScreenerResults;
+  comparison?: ComparisonResult;
+  whatChanged?: WhatChanged;
 }
 
 export interface ChatRequestBody {
@@ -80,6 +102,7 @@ export interface ChatResponseBody {
   card?: OttoAnalysis;
   visual?: FollowUpVisual;
   screener?: ScreenerResults;
+  comparison?: ComparisonResult;
 }
 
 /** Which real data source a progress stage is hitting — powers the small
