@@ -5,6 +5,7 @@ import type { OttoAnalysis } from "@/lib/otto/schema";
 import { VerdictTag } from "./VerdictTag";
 import { MiniSparkline } from "./MiniSparkline";
 import { Disclaimer } from "./Disclaimer";
+import { CountUp } from "./CountUp";
 
 function scoreColor(score: number) {
   if (score >= 75) return "var(--otto-gold)";
@@ -86,7 +87,7 @@ export function OttoCardCompact({
               className="tabular-nums text-2xl font-semibold"
               style={{ color: analysis.dataQuality === "insufficient" ? "var(--otto-text-faint)" : scoreColor(analysis.convictionScore) }}
             >
-              {analysis.dataQuality === "insufficient" ? "—" : Math.round(analysis.convictionScore)}
+              {analysis.dataQuality === "insufficient" ? "—" : <CountUp value={Math.round(analysis.convictionScore)} />}
             </span>
           </div>
           <MiniSparkline data={analysis.historicalPrices} positive={positive} />

@@ -26,7 +26,7 @@ function relativeDay(iso: string): string {
  */
 export function ProvisionalCard({ prior }: { prior: LoggedCall }) {
   return (
-    <div className="otto-material w-full max-w-md rounded-2xl border border-otto-border-soft p-5 opacity-75">
+    <div className="otto-material otto-provisional-shimmer w-full max-w-md rounded-2xl border border-otto-border-soft p-5 opacity-75">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">

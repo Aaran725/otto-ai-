@@ -427,6 +427,37 @@ button:active {
   }
 }
 
+/* Provisional shimmer — a soft light band sweeps across the "last known"
+   placeholder card while a fresh search is in flight, reading as active
+   work rather than a flat, static hold. */
+@keyframes otto-shimmer-sweep {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(120%);
+  }
+}
+.otto-provisional-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.otto-provisional-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, color-mix(in srgb, var(--otto-gold) 14%, transparent) 50%, transparent 70%);
+  transform: translateX(-120%);
+  animation: otto-shimmer-sweep 2.2s ease-in-out infinite;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .otto-provisional-shimmer::after {
+    animation: none;
+    display: none;
+  }
+}
+
 /* Progress trace — a thin glass rail connecting the stage badges, so the
    loading checklist reads as one continuous strand of work rather than
    floating dots. */

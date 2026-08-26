@@ -6,6 +6,7 @@ import type { ComparisonResult } from "@/lib/otto/chat-types";
 import { VerdictTag } from "./VerdictTag";
 import { SnowflakeChart } from "./SnowflakeChart";
 import { Disclaimer } from "./Disclaimer";
+import { CountUp } from "./CountUp";
 
 function scoreColor(score: number) {
   if (score >= 75) return "var(--otto-gold)";
@@ -44,11 +45,12 @@ export function ComparisonCard({
           analyses.length >= 3 ? "grid-cols-1 sm:grid-cols-3" : "grid-cols-1 sm:grid-cols-2"
         )}
       >
-        {analyses.map((analysis) => (
+        {analyses.map((analysis, i) => (
           <button
             key={analysis.ticker}
             onClick={() => onSelect?.(analysis.ticker)}
-            className="min-w-0 rounded-xl border border-otto-border-soft p-3 text-left transition-colors hover:border-otto-text-faint"
+            style={{ animationDelay: `${i * 80}ms` }}
+            className="otto-arrive min-w-0 rounded-xl border border-otto-border-soft p-3 text-left transition-colors hover:border-otto-text-faint"
           >
             <div className="flex items-center justify-between gap-2">
               <span className="otto-text-title text-otto-text">{analysis.ticker}</span>
@@ -56,7 +58,7 @@ export function ComparisonCard({
                 className="tabular-nums text-lg font-semibold"
                 style={{ color: analysis.dataQuality === "insufficient" ? "var(--otto-text-faint)" : scoreColor(analysis.convictionScore) }}
               >
-                {analysis.dataQuality === "insufficient" ? "—" : Math.round(analysis.convictionScore)}
+                {analysis.dataQuality === "insufficient" ? "—" : <CountUp value={Math.round(analysis.convictionScore)} />}
               </span>
             </div>
             <p className="otto-text-caption truncate text-otto-text-muted">{analysis.companyName}</p>

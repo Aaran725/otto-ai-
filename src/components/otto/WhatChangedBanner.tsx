@@ -1,5 +1,6 @@
 import { clsx } from "clsx";
 import type { WhatChanged } from "@/lib/otto/chat-types";
+import { CountUp } from "./CountUp";
 
 function relativeDay(iso: string): string {
   const days = Math.round((Date.now() - new Date(iso).getTime()) / (24 * 60 * 60 * 1000));
@@ -22,7 +23,7 @@ export function WhatChangedBanner({ whatChanged }: { whatChanged: WhatChanged })
       Conviction {up ? "up" : "down"}{" "}
       <span className={clsx("font-medium tabular-nums", up ? "text-otto-bull" : "text-otto-bear")}>
         {up ? "+" : ""}
-        {Math.round(whatChanged.scoreDelta)}
+        <CountUp value={Math.round(whatChanged.scoreDelta)} />
       </span>
       .
     </div>

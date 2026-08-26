@@ -6,6 +6,7 @@ import type { PortfolioAnalysis } from "@/lib/otto/portfolio-analysis";
 import type { DigestEntry } from "@/lib/otto/watchlist-digest";
 import { removeFromWatchlist } from "@/lib/otto/persistence";
 import { Disclaimer } from "./Disclaimer";
+import { CountUp } from "./CountUp";
 
 // Same threshold as the single-search "what changed" banner — day-to-day
 // conviction-score noise shouldn't read as a real change here either.
@@ -98,9 +99,15 @@ export function PortfolioPanel({
                 </p>
                 {change && (
                   <p className="mt-0.5 text-xs font-medium text-otto-gold">
-                    {change.verdictChanged
-                      ? `Verdict changed — now check the details.`
-                      : `Conviction ${change.scoreDelta >= 0 ? "up" : "down"} ${change.scoreDelta >= 0 ? "+" : ""}${Math.round(change.scoreDelta)} since you added it.`}
+                    {change.verdictChanged ? (
+                      "Verdict changed — now check the details."
+                    ) : (
+                      <>
+                        Conviction {change.scoreDelta >= 0 ? "up" : "down"}{" "}
+                        {change.scoreDelta >= 0 ? "+" : ""}
+                        <CountUp value={Math.round(change.scoreDelta)} /> since you added it.
+                      </>
+                    )}
                   </p>
                 )}
               </button>
