@@ -394,8 +394,8 @@ export function ChatApp() {
               </div>
             )}
             {pending && (
-              <div className="otto-arrive otto-glow-border otto-material rounded-2xl border border-otto-border-soft p-4">
-                <div className="otto-progress-rail flex flex-col gap-2">
+              <div className="otto-arrive otto-glow-border rounded-2xl">
+                <div className="otto-material otto-progress-rail flex flex-col gap-2 rounded-2xl border border-otto-border-soft p-4">
                   {statusTrace.length === 0 ? (
                     <div className="flex items-center gap-1.5 text-otto-text-faint">
                       <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
@@ -436,16 +436,15 @@ export function ChatApp() {
       )}
 
       <div className="otto-material-thick absolute inset-x-0 bottom-0 border-t px-4 pb-6 pt-4 sm:px-0">
-        <div className="mx-auto w-full max-w-2xl">
+        <div
+          className={clsx("mx-auto w-full max-w-2xl rounded-full", (pending || inputFocused) && "otto-glow-border")}
+        >
           <form
             onSubmit={(e) => {
               e.preventDefault();
               send(input);
             }}
-            className={clsx(
-              "flex items-center gap-2 rounded-full border border-otto-border bg-otto-bg-raised px-3 py-2.5",
-              (pending || inputFocused) && "otto-glow-border"
-            )}
+            className="flex items-center gap-2 rounded-full border border-otto-border bg-otto-bg-raised px-3 py-2.5"
           >
             <PresetMenu disabled={pending} onSelect={(query) => send(query)} />
             <input

@@ -416,31 +416,30 @@ button:active {
 /* Apple-Intelligence-style glow border — a rotating conic gradient ring,
    masked down to just the border width, for the moments a user watches
    most closely (an active input, Otto actively working). */
+/* Wraps its single child (which keeps its own real background/blur — e.g.
+   an otto-material surface stays translucent) — the wrapper contributes
+   only 2px of padding filled with the rotating gradient, so the ring
+   appears without a mask-composite trick (unreliable across build
+   pipelines; a straight background rotation is not). */
+@property --otto-glow-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
 @keyframes otto-glow-rotate {
   to {
-    transform: rotate(1turn);
+    --otto-glow-angle: 360deg;
   }
 }
 .otto-glow-border {
-  position: relative;
-  isolation: isolate;
-}
-.otto-glow-border::before {
-  content: "";
-  position: absolute;
-  inset: -2px;
-  z-index: -1;
-  border-radius: inherit;
+  display: block;
   padding: 2px;
-  background: conic-gradient(from 0deg, var(--otto-gold), #a78bfa, var(--otto-bull), var(--otto-gold));
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
+  background: conic-gradient(from var(--otto-glow-angle), var(--otto-gold), #a78bfa, var(--otto-bull), var(--otto-gold));
   filter: drop-shadow(0 0 6px rgba(167, 139, 250, 0.55));
   animation: otto-glow-rotate 3s linear infinite;
 }
 @media (prefers-reduced-motion: reduce) {
-  .otto-glow-border::before {
+  .otto-glow-border {
     animation: none;
   }
 }
