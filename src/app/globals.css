@@ -379,6 +379,54 @@ button:active {
   }
 }
 
+/* Depth grid — a faint dot-grid layer beneath the ambient light field, the
+   kind of subtle texture that keeps a dark hero from reading as flat.
+   Static (no animation) so it doesn't compete with the ambient drift
+   layered on top of it. Masked to fade out toward the edges. */
+.otto-grid-field {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--otto-text) 10%, transparent) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 35%, black 40%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 35%, black 40%, transparent 100%);
+}
+
+/* Shiny text sweep — a soft highlight band drifts across the hero headline
+   instead of sitting on a static gradient. Same gold/bull palette, just in
+   motion; pure background-position animation, no extra markup or library. */
+@keyframes otto-shine-sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+.otto-shine-text {
+  background-image: linear-gradient(
+    100deg,
+    var(--otto-gold) 20%,
+    var(--otto-bull) 40%,
+    #fff 50%,
+    var(--otto-gold) 60%,
+    var(--otto-bull) 80%
+  );
+  background-size: 250% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: otto-shine-sweep 6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .otto-shine-text {
+    animation: none;
+    background-position: 0 0;
+  }
+}
+
 /* Progress trace — a thin glass rail connecting the stage badges, so the
    loading checklist reads as one continuous strand of work rather than
    floating dots. */

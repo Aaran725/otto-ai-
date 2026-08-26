@@ -45,6 +45,7 @@ export function LandingHero({ onStart, onExample }: { onStart: () => void; onExa
 
   return (
     <div className="relative flex h-full flex-col items-center overflow-y-auto px-4 pb-32 pt-24 sm:px-6">
+      <div className="otto-grid-field" />
       <div className="otto-ambient-field" />
 
       <div className="relative z-10 grid w-full max-w-5xl grid-cols-1 items-center gap-12 lg:grid-cols-2 lg:gap-8">
@@ -54,9 +55,7 @@ export function LandingHero({ onStart, onExample }: { onStart: () => void; onExa
           <h1 className="otto-text-display text-4xl leading-[1.05] text-otto-text sm:text-5xl">
             Everyone has an opinion.
             <br />
-            <span className="bg-gradient-to-r from-otto-gold via-otto-gold to-otto-bull bg-clip-text text-transparent">
-              Otto has a verdict.
-            </span>
+            <span className="otto-shine-text">Otto has a verdict.</span>
           </h1>
           <p className="otto-text-body mt-5 max-w-md text-otto-text-muted">
             Ask about any ticker. Otto pulls real filings and market data, runs a deterministic score, and gives
