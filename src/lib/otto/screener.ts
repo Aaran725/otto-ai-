@@ -567,13 +567,24 @@ export function applyValueScoreBlend(intent: ScreenIntent, baseComposite: number
  * Returns per-axis scores too, not just the composite, so a caller can
  * explain *which* axis diverged.
  */
-export async function getCachedScreenerSnapshot(symbol: string): Promise<{ compositeScore: number; sf: OttoSnowflakeScores } | null> {
+/**
+ * `intent` defaults to "best" only for callers with no real screen context
+ * (a cold search with nothing to compare against). When the caller knows
+ * which screen the user actually looked at, pass it — comparing against
+ * "best" unconditionally was the reconciliation note's original bug: a
+ * confirmed live case (screened at 100 under "undervalued," conviction 85)
+ * compared against "best"'s 97 instead, hiding part of a real 15-point gap.
+ */
+export async function getCachedScreenerSnapshot(
+  symbol: string,
+  intent: ScreenIntent = "best"
+): Promise<{ compositeScore: number; sf: OttoSnowflakeScores } | null> {
   // Must match getSymbolSnapshot's cache key exactly (raw symbol, no case
   // normalization) — screener candidates are always already-uppercase from
   // their sources, so this is consistent in practice.
   const snap = await getSymbolScoreCache<SymbolSnapshot | null>().get(symbol);
   if (!snap) return null;
-  return { compositeScore: scoreCandidate("best", snap.sf), sf: snap.sf };
+  return { compositeScore: scoreCandidate(intent, snap.sf), sf: snap.sf };
 }
 
 function buildKeyStat(
@@ -843,7 +854,8 @@ export async function runScreener(
     const shortInterestBySymbol = new Map<string, ShortInterestData>();
 
     const withInsider = await mapWithConcurrency(semifinalists, 4, async (candidate) => {
-      const [activity, trend, fundamentals, financialsTrend, snap, priceTarget, earnings, shortInterest] = await Promise.all([
+      const [activity, trend, fundamentals, financialsTrend, snap, priceTarget, earnings, shortInterest, monthlyHistory] =
+        await Promise.all([
         fetchInsiderActivity(candidate.symbol).catch(() => null),
         fetchFinnhubRatingTrend(candidate.symbol).catch(() => null),
         fetchFinnhubFundamentals(candidate.symbol).catch(() => null),
@@ -868,6 +880,15 @@ export async function runScreener(
         // Real FINRA short-interest data, same reuse — high/rising short
         // interest is a genuine risk flag regardless of screen intent.
         fetchShortInterest(candidate.symbol).catch(() => null),
+        // Real monthly closes — without this, the momentum axis's trend
+        // checks (12mo trend, price vs. 50/200-day average) can't run at
+        // all for any screener candidate (buildFinnhubBundle never fetches
+        // price history), leaving "momentum" scored mostly on today's 1-day
+        // move and 52-week-high proximity alone. Same Alpaca-first,
+        // Yahoo-fallback pair used everywhere else in this file.
+        fetchAlpacaHistoricalMonthly(candidate.symbol)
+          .then((points) => (points.length > 0 ? points : fetchYahooHistoricalMonthly(candidate.symbol)))
+          .catch(() => []),
       ]);
       if (trend) ratingTrendBySymbol.set(candidate.symbol, trend);
       if (earnings) earningsBySymbol.set(candidate.symbol, earnings);
@@ -909,7 +930,7 @@ export async function runScreener(
           keyMetrics: fundamentals.keyMetrics,
           priceTargetConsensus: null,
           gradesConsensus: null,
-          historicalMonthly: [],
+          historicalMonthly: monthlyHistory,
           income: financialsTrend.income,
           cashFlow: financialsTrend.cashFlow,
         };
@@ -950,6 +971,20 @@ export async function runScreener(
           sf,
           valueScore,
         };
+        // Write the enriched (real income/cash-flow) Snowflake back into the
+        // shared per-symbol cache — without this, getCachedScreenerSnapshot
+        // (the reconciliation-note baseline) keeps reading the older, thin
+        // wide-pool snapshot from getSymbolSnapshot even for a symbol that
+        // just got real financials here, so the "screened at X" a user sees
+        // later wouldn't match what actually ranked them into this list.
+        getSymbolScoreCache<SymbolSnapshot | null>().set(candidate.symbol, {
+          price: candidate.price,
+          ratios: fundamentals.ratios,
+          keyMetrics: fundamentals.keyMetrics,
+          changePercentage: enrichedBundle.quote.changePercentage,
+          sf,
+          fundamentalsChecksRun,
+        });
       } else if (analystUpsidePct !== undefined && intent === "momentum") {
         // financialsTrend missing but we still have the target price —
         // swap in the upside-to-target display without recomputing the

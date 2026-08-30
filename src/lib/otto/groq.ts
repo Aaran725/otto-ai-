@@ -1,7 +1,7 @@
 import Groq from "groq-sdk";
 import { OTTO_SYSTEM_PROMPT, buildOttoUserPrompt } from "./system-prompt";
 import type { GroqOttoResponse, OttoAnalysis, OttoSnowflake, StreetConsensus, DataQuality } from "./schema";
-import { getCachedScreenerSnapshot } from "./screener";
+import { getCachedScreenerSnapshot, type ScreenIntent } from "./screener";
 import { recordEvent } from "./observability";
 import { getAnalysisCache } from "./cache";
 import { computeSnowflake, type OttoSnowflakeScores } from "./snowflake";
@@ -167,15 +167,37 @@ const PARTIAL_ANALYSIS_TTL_MS = 90 * 1000;
 export async function runOttoAnalysis(
   ticker: string,
   bundle: StockBundle,
-  onProgress?: ProgressFn
+  onProgress?: ProgressFn,
+  intentHint?: ScreenIntent
 ): Promise<OttoAnalysis> {
   const cacheKey = `${ticker}:${new Date().toISOString().slice(0, 10)}`;
   const cache = getAnalysisCache<OttoAnalysis>();
 
   const cached = await cache.get(cacheKey);
-  if (cached) return cached; // cache hit: genuinely instant, no stages to report
+  const analysis = cached ?? (await buildOttoAnalysis(ticker, bundle, onProgress));
 
-  const analysis = await buildOttoAnalysis(ticker, bundle, onProgress);
+  // Reconciliation is computed fresh here — on every call, cache hit or
+  // not — rather than baked into the cached OttoAnalysis. It's cheap
+  // (computeSnowflake is pure/deterministic, getCachedScreenerSnapshot is
+  // one Redis read) and it means the comparison always uses the CURRENT
+  // request's actual screen context (intentHint), not whichever context
+  // (or lack of one) happened to be in scope the first time this ticker
+  // was analyzed today. Without this, a cache hit from an earlier "best"
+  // search would silently reuse a "best"-compared note even when this
+  // request came from an "undervalued" screener click.
+  const analysisSf = computeSnowflake(bundle);
+  const screenerSnap = await getCachedScreenerSnapshot(ticker, intentHint);
+  const reconciliationNote = buildReconciliationNoteFromSnapshot(screenerSnap, analysis.convictionScore, analysisSf);
+  if (screenerSnap && Math.abs(Math.round(analysis.convictionScore) - screenerSnap.compositeScore) > 25) {
+    recordEvent("score_divergence", {
+      ticker,
+      screenScore: screenerSnap.compositeScore,
+      convictionScore: Math.round(analysis.convictionScore),
+    });
+  }
+  const withReconciliation: OttoAnalysis = { ...analysis, reconciliationNote };
+
+  if (cached) return withReconciliation; // cache hit: genuinely instant, no stages to report
 
   // If the underlying bundle was missing price history/financials, OR the
   // analysis itself came back data-starved (dataQuality, computed from real
@@ -187,7 +209,7 @@ export async function runOttoAnalysis(
   const isPartial =
     bundle.historicalMonthly.length === 0 || bundle.income.length === 0 || analysis.dataQuality === "insufficient";
   cache.set(cacheKey, analysis, isPartial ? PARTIAL_ANALYSIS_TTL_MS : undefined);
-  return analysis;
+  return withReconciliation;
 }
 
 /**
@@ -444,32 +466,17 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       dataQuality === "insufficient"
         ? `Not enough real financial data available for ${ticker} right now — treat any score as unreliable and verify independently.`
         : base.oneLiner;
-    // Fetched once and reused for both the reconciliation note and the
-    // divergence metric below, rather than two separate cache round-trips.
-    const screenerSnap = await getCachedScreenerSnapshot(ticker);
-    const reconciliationNote = buildReconciliationNoteFromSnapshot(screenerSnap, base.convictionScore, snowflakeScores);
 
     if (dataQuality === "insufficient") {
       recordEvent("data_quality_insufficient", { ticker });
     }
 
-    // Phase 1 item 3 / Phase 3 item 2: passive server-side signal for how
-    // often the two pipelines actually disagree by a lot. If this fires
-    // rarely, the existing disclaimer is sufficient; if it's common, the
-    // screener and single-stock scoring need to converge, not just be
-    // labeled differently.
-    if (screenerSnap && Math.abs(Math.round(base.convictionScore) - screenerSnap.compositeScore) > 25) {
-      recordEvent("score_divergence", {
-        ticker,
-        screenScore: screenerSnap.compositeScore,
-        convictionScore: Math.round(base.convictionScore),
-      });
-    }
-
     return {
       ...base,
       oneLiner,
-      reconciliationNote,
+      // Overwritten by runOttoAnalysis on every read (cache hit or not) —
+      // see its comment for why this can't be computed here and baked in.
+      reconciliationNote: null,
       dataQuality,
       historicalPrices: bundle.historicalMonthly.map((p) => ({
         date: p.date,

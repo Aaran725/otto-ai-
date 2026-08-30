@@ -25,6 +25,7 @@ export async function POST(request: Request) {
   const body = (await request.json()) as ChatRequestBody;
   const message = body.message?.trim();
   const history = body.history ?? [];
+  const intentHint = body.intentHint;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -76,7 +77,7 @@ export async function POST(request: Request) {
         async function runFreshAnalysis(resolved: ResolvedTicker) {
           const emit: ProgressFn = (update) => send({ type: "status", ...update });
           const bundle = await fetchStockBundle(resolved.symbol, emit);
-          const analysis = await runOttoAnalysis(resolved.symbol, bundle, emit);
+          const analysis = await runOttoAnalysis(resolved.symbol, bundle, emit, intentHint);
           send({ type: "done", reply: analysis.oneLiner, card: analysis });
           closeOnce();
         }
@@ -237,6 +238,7 @@ export async function POST(request: Request) {
               type: "done",
               reply: `Screened the market for "${fullLabel}" — top pick is ${top.symbol} at $${top.price.toFixed(2)}.${shortListNote} Tap any row for the full research.`,
               screener: {
+                intent: screenIntent,
                 intentLabel: fullLabel,
                 results: results.map((r, i) => ({ rank: i + 1, ...r })),
                 isAvoidList: screenIntent === "avoid",

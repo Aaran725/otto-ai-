@@ -9,7 +9,7 @@ import type {
 } from "./schema";
 import type { PeerValuation } from "./peers";
 import type { InsiderActivity } from "./insider";
-import type { ScreenerWhyBreakdown } from "./screener";
+import type { ScreenerWhyBreakdown, ScreenIntent } from "./screener";
 
 /** A small, targeted visual answering one follow-up question about a stock
  * already discussed — deliberately smaller than the full OttoCardCompact,
@@ -56,6 +56,7 @@ export interface ScreenerResultItem {
 }
 
 export interface ScreenerResults {
+  intent: ScreenIntent; // the real screen this scan ran under — see ChatRequestBody.intentHint
   intentLabel: string; // e.g. "Undervalued picks"
   results: ScreenerResultItem[];
   isAvoidList?: boolean; // inverts score coloring — a "least bad" score still isn't good
@@ -95,6 +96,11 @@ export interface ChatMessage {
 export interface ChatRequestBody {
   message: string;
   history: ChatMessage[];
+  // Set only when this message is a click-through from a specific screener
+  // result (see ChatApp's send()) — lets the single-stock analysis compare
+  // its conviction score against the exact screen the user actually saw,
+  // instead of always against a neutral "best"-weighted baseline.
+  intentHint?: ScreenIntent;
 }
 
 export interface ChatResponseBody {

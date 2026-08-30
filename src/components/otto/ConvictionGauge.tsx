@@ -1,4 +1,5 @@
 import type { DataQuality } from "@/lib/otto/schema";
+import { confidenceRangeHalfWidth } from "@/lib/otto/confidence";
 
 function scoreColor(score: number) {
   if (score >= 75) return "var(--otto-gold)";
@@ -10,6 +11,7 @@ function scoreColor(score: number) {
 export function ConvictionGauge({ score, dataQuality }: { score: number; dataQuality?: DataQuality }) {
   const insufficient = dataQuality === "insufficient";
   const clamped = Math.max(0, Math.min(100, score));
+  const halfWidth = confidenceRangeHalfWidth(dataQuality ?? "full");
   const radius = 54;
   const circumference = 2 * Math.PI * radius;
   // A near-empty ring reads as "no real signal" rather than a number that
@@ -48,6 +50,11 @@ export function ConvictionGauge({ score, dataQuality }: { score: number; dataQua
         <span className="otto-text-label text-otto-text-faint">
           {insufficient ? "No Rating" : "Conviction"}
         </span>
+        {!insufficient && (
+          <span className="mt-0.5 text-[10px] tabular-nums text-otto-text-faint" title="Honest range given how much real data went into this score">
+            ±{halfWidth}
+          </span>
+        )}
       </div>
     </div>
   );

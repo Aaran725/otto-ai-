@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { clsx } from "clsx";
 import type { ChatMessage, ChatStreamEvent, ProgressUpdate, StageIcon } from "@/lib/otto/chat-types";
+import type { ScreenIntent } from "@/lib/otto/screener";
 import type { OttoAnalysis } from "@/lib/otto/schema";
 import { OttoCardCompact } from "./OttoCardCompact";
 import { MiniSparkline } from "./MiniSparkline";
@@ -113,7 +114,7 @@ export function ChatApp() {
     });
   }
 
-  async function send(text: string) {
+  async function send(text: string, intentHint?: ScreenIntent) {
     const trimmed = text.trim();
     if (!trimmed || pending) return;
 
@@ -138,7 +139,7 @@ export function ChatApp() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed, history: nextHistory }),
+        body: JSON.stringify({ message: trimmed, history: nextHistory, intentHint }),
       });
       if (!res.body) throw new Error("Something went wrong");
 
@@ -380,7 +381,7 @@ export function ChatApp() {
                           </>
                         )}
                         {m.screener && (
-                          <ScreenerResultsCard screener={m.screener} onSelect={(symbol) => send(symbol)} />
+                          <ScreenerResultsCard screener={m.screener} onSelect={(symbol) => send(symbol, m.screener?.intent)} />
                         )}
                       </>
                     )}

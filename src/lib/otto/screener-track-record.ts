@@ -107,22 +107,82 @@ const ALL_CALLS_KEY = `${NAMESPACE}:calls:all`;
  * A real, dollar-denominated simulated portfolio layered on top of the
  * pick-by-pick track record — reports what a real $10,000 stake would
  * actually be worth today, not just an abstract average alpha percentage.
- * One combined pool across every logged intent (undervalued/momentum/
- * best/quality), not four separate pools — "the track record" is one
- * claim, not four.
+ *
+ * Originally one combined pool across every logged intent. Changed after
+ * a live check found the flaw that design invited: cash is only returned
+ * at a call's real d180 close (see evaluateDueScreenerCalls), so whichever
+ * intents happened to log their first finalists first could — and did —
+ * claim the entire shared pool, locking the others out of ever being
+ * tested with real capital for a full 180 days. A single shared pool makes
+ * "who gets funded" a function of scan scheduling, not conviction.
+ * Each intent now gets its own dedicated sub-pool so none can starve
+ * another; getPortfolioSummary still reports one combined total, so "the
+ * track record is one claim" holds at the reporting layer even though the
+ * allocation mechanics are per-intent underneath.
  */
 const PORTFOLIO_KEY = `${NAMESPACE}:portfolio`;
 const STARTING_CASH = 10_000;
+type FundedIntent = "undervalued" | "momentum" | "best" | "quality";
+const FUNDED_INTENTS: FundedIntent[] = ["undervalued", "momentum", "best", "quality"];
+const PER_INTENT_STARTING_CASH = STARTING_CASH / FUNDED_INTENTS.length;
+
+// One-time correction, applied only when migrating a pre-existing shared
+// pool (see getPortfolio's migration branch): undervalued and momentum had
+// logged zero funded calls under the old shared-pool model by the time
+// this shipped, while best/quality had already claimed the entire
+// original $10,000 between them. Rather than silently rewriting or
+// clawing back those already-permanent, already-real positions, this
+// injects fresh capital so the two starved intents get the same real
+// trial the other two already have — a disclosed, one-time top-up, not a
+// reset. TOTAL_CONTRIBUTED_CASH reflects the true lifetime total so
+// totalReturnPct in getPortfolioSummary stays honest against it.
+const CORRECTION_INJECTION_PER_INTENT = PER_INTENT_STARTING_CASH;
+const TOTAL_CONTRIBUTED_CASH = STARTING_CASH + CORRECTION_INJECTION_PER_INTENT * 2;
 
 export interface PortfolioState {
+  cashByIntent: Record<FundedIntent, number>;
+  startedAt: string;
+}
+
+interface LegacyPortfolioState {
   cashAvailable: number;
   startedAt: string;
 }
 
+function isLegacyPortfolioState(state: PortfolioState | LegacyPortfolioState): state is LegacyPortfolioState {
+  return typeof (state as LegacyPortfolioState).cashAvailable === "number";
+}
+
 async function getPortfolio(): Promise<PortfolioState> {
-  const existing = await redis.get<PortfolioState>(PORTFOLIO_KEY);
-  if (existing) return existing;
-  const fresh: PortfolioState = { cashAvailable: STARTING_CASH, startedAt: new Date().toISOString() };
+  const existing = await redis.get<PortfolioState | LegacyPortfolioState>(PORTFOLIO_KEY);
+  if (existing) {
+    if (!isLegacyPortfolioState(existing)) return existing;
+    // Migrate the old shared pool once. Any cash still sitting unclaimed
+    // in the legacy pool is split evenly between best/quality (the two
+    // intents that were actually drawing from it) since it was never
+    // owned by any one of them specifically.
+    const remainder = existing.cashAvailable / 2;
+    const migrated: PortfolioState = {
+      startedAt: existing.startedAt,
+      cashByIntent: {
+        best: remainder,
+        quality: remainder,
+        undervalued: CORRECTION_INJECTION_PER_INTENT,
+        momentum: CORRECTION_INJECTION_PER_INTENT,
+      },
+    };
+    await redis.set(PORTFOLIO_KEY, migrated);
+    return migrated;
+  }
+  const fresh: PortfolioState = {
+    startedAt: new Date().toISOString(),
+    cashByIntent: {
+      undervalued: PER_INTENT_STARTING_CASH,
+      momentum: PER_INTENT_STARTING_CASH,
+      best: PER_INTENT_STARTING_CASH,
+      quality: PER_INTENT_STARTING_CASH,
+    },
+  };
   await redis.set(PORTFOLIO_KEY, fresh);
   return fresh;
 }
@@ -202,16 +262,18 @@ export async function logScreenerCall(params: {
     const onCooldown = await redis.get(cooldownKey(params.intent, params.symbol));
     if (onCooldown) return;
 
-    // Cash allocation: this function is called sequentially (awaited, not
-    // fire-and-forget — see runScreener) in rank order for each scan's
-    // finalists, so the highest-conviction pick of the batch claims cash
-    // first. A pick is never skipped or left unlogged just because the sim
-    // is low on funds — that would quietly bias the record toward only
-    // well-funded days. When cash is scarce it just gets a smaller (or
-    // $0, "watch only") stake instead; the call itself is always tracked.
+    // Cash allocation: draws only from this intent's own sub-pool, never
+    // another's — see the PortfolioState comment for why. This function is
+    // called sequentially (awaited, not fire-and-forget — see runScreener)
+    // in rank order for each scan's finalists, so the highest-conviction
+    // pick of the batch claims its intent's cash first. A pick is never
+    // skipped or left unlogged just because that intent's sub-pool is low
+    // — that would quietly bias the record toward only well-funded days.
+    // When cash is scarce it just gets a smaller (or $0, "watch only")
+    // stake instead; the call itself is always tracked.
     const portfolio = await getPortfolio();
     const target = targetAllocation(params.compositeScore, params.monthlyCloses);
-    const allocatedAmount = Math.max(0, Math.min(target, portfolio.cashAvailable));
+    const allocatedAmount = Math.max(0, Math.min(target, portfolio.cashByIntent[params.intent]));
 
     const now = Date.now();
     const id = `${params.intent}:${params.symbol}:${now}`;
@@ -239,7 +301,10 @@ export async function logScreenerCall(params: {
       redis.zadd(ALL_CALLS_KEY, { score: now, member: id }),
       redis.zadd(intentCallsKey(params.intent), { score: now, member: id }),
       redis.set(cooldownKey(params.intent, params.symbol), true, { ex: COOLDOWN_DAYS * 24 * 60 * 60 }),
-      redis.set(PORTFOLIO_KEY, { ...portfolio, cashAvailable: portfolio.cashAvailable - allocatedAmount }),
+      redis.set(PORTFOLIO_KEY, {
+        ...portfolio,
+        cashByIntent: { ...portfolio.cashByIntent, [params.intent]: portfolio.cashByIntent[params.intent] - allocatedAmount },
+      }),
     ]);
   } catch {
     // Best-effort — losing a track-record entry is a completeness gap for
@@ -270,7 +335,15 @@ export async function resetTrackRecord(): Promise<{ purgedCalls: number }> {
     redis.del(ALL_CALLS_KEY),
     ...(["undervalued", "momentum", "best", "quality"] as ScreenIntent[]).map((intent) => redis.del(intentCallsKey(intent))),
   ]);
-  const fresh: PortfolioState = { cashAvailable: STARTING_CASH, startedAt: new Date().toISOString() };
+  const fresh: PortfolioState = {
+    startedAt: new Date().toISOString(),
+    cashByIntent: {
+      undervalued: PER_INTENT_STARTING_CASH,
+      momentum: PER_INTENT_STARTING_CASH,
+      best: PER_INTENT_STARTING_CASH,
+      quality: PER_INTENT_STARTING_CASH,
+    },
+  };
   await redis.set(PORTFOLIO_KEY, fresh);
   return { purgedCalls: calls.length };
 }
@@ -367,29 +440,33 @@ export interface PortfolioSummary {
 }
 
 /**
- * The real dollar-denominated headline: what a $10,000 stake, sized by
- * real conviction and allocated in the real order picks were made, is
- * actually worth today — cash on hand plus the live mark-to-market value
- * of every still-open position. Open positions use the same live quote as
+ * The real dollar-denominated headline: what the combined per-intent
+ * sub-pools, sized by real conviction and allocated in the real order
+ * picks were made, are actually worth today — cash on hand across every
+ * intent's sub-pool plus the live mark-to-market value of every still-open
+ * position. Open positions use the same live quote as
  * getScreenerCallsWithLiveMarks; closed ones (past their 180-day horizon)
- * already had their value folded back into cashAvailable at close time, so
- * they don't get double-counted here.
+ * already had their value folded back into their intent's sub-pool at
+ * close time, so they don't get double-counted here. Reported as one
+ * combined total — see the PortfolioState comment on why the allocation
+ * mechanics are per-intent but the headline number isn't.
  */
 export async function getPortfolioSummary(): Promise<PortfolioSummary> {
   const [portfolio, callsWithLive] = await Promise.all([getPortfolio(), getScreenerCallsWithLiveMarks()]);
+  const cashAvailable = FUNDED_INTENTS.reduce((sum, intent) => sum + portfolio.cashByIntent[intent], 0);
   const open = callsWithLive.filter((c) => !c.closed);
   const openPositionsValue = open.reduce((sum, c) => {
     const liveReturnPct = c.live?.stockReturnPct ?? 0;
     return sum + c.allocatedAmount * (1 + liveReturnPct / 100);
   }, 0);
-  const totalValue = portfolio.cashAvailable + openPositionsValue;
+  const totalValue = cashAvailable + openPositionsValue;
   return {
     startedAt: portfolio.startedAt,
-    startingCash: STARTING_CASH,
-    cashAvailable: Math.round(portfolio.cashAvailable),
+    startingCash: TOTAL_CONTRIBUTED_CASH,
+    cashAvailable: Math.round(cashAvailable),
     openPositionsValue: Math.round(openPositionsValue),
     totalValue: Math.round(totalValue),
-    totalReturnPct: ((totalValue - STARTING_CASH) / STARTING_CASH) * 100,
+    totalReturnPct: ((totalValue - TOTAL_CONTRIBUTED_CASH) / TOTAL_CONTRIBUTED_CASH) * 100,
     openPositionCount: open.length,
     closedPositionCount: callsWithLive.length - open.length,
   };
@@ -510,8 +587,15 @@ export async function updateDailyPeaks(): Promise<{ updated: number; alphaHighs:
       if (!priceChanged && !alphaChanged && !earlyExit) continue;
 
       if (earlyExit) {
+        // Cast is safe: logScreenerCall never logs "avoid"/"contrarian", so
+        // every record with a nonzero allocatedAmount (and therefore ever
+        // reaching an early-exit credit) is one of the 4 funded intents.
+        const intent = call.intent as FundedIntent;
         const portfolio = await getPortfolio();
-        await redis.set(PORTFOLIO_KEY, { ...portfolio, cashAvailable: portfolio.cashAvailable + cashCredit });
+        await redis.set(PORTFOLIO_KEY, {
+          ...portfolio,
+          cashByIntent: { ...portfolio.cashByIntent, [intent]: portfolio.cashByIntent[intent] + cashCredit },
+        });
       }
       await redis.set(recordKey(call.id), {
         ...call,
@@ -585,15 +669,21 @@ export async function evaluateDueScreenerCalls(): Promise<{ evaluated: number; c
 
       // 180 days is the position's full horizon — closing it returns its
       // real, realized simulated value (stake × (1 + actual stock return))
-      // back to the cash pool, freeing capital for new picks instead of
-      // leaving it locked in a position the record has already fully
-      // judged. This is the portfolio's only turnover mechanic, anchored
-      // on data already collected here, not a separate exit rule.
+      // back to that intent's own sub-pool, freeing capital for that same
+      // intent's future picks instead of leaving it locked in a position
+      // the record has already fully judged. This is the portfolio's only
+      // turnover mechanic, anchored on data already collected here, not a
+      // separate exit rule.
       const closing = milestones.includes(180);
       if (closing) {
+        // Cast is safe — see the identical note on the early-exit credit above.
+        const intent = call.intent as FundedIntent;
         const portfolio = await getPortfolio();
         const closingValue = call.allocatedAmount * (1 + stockReturnPct / 100);
-        await redis.set(PORTFOLIO_KEY, { ...portfolio, cashAvailable: portfolio.cashAvailable + closingValue });
+        await redis.set(PORTFOLIO_KEY, {
+          ...portfolio,
+          cashByIntent: { ...portfolio.cashByIntent, [intent]: portfolio.cashByIntent[intent] + closingValue },
+        });
       }
 
       await redis.set(recordKey(call.id), { ...call, evaluations: newEvaluations, closed: closing || call.closed });
