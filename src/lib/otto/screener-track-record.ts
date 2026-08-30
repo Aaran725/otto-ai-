@@ -139,8 +139,21 @@ const PER_INTENT_STARTING_CASH = STARTING_CASH / FUNDED_INTENTS.length;
 const CORRECTION_INJECTION_PER_INTENT = PER_INTENT_STARTING_CASH;
 const TOTAL_CONTRIBUTED_CASH = STARTING_CASH + CORRECTION_INJECTION_PER_INTENT * 2;
 
+// The short book — real simulated capital behind "Avoid"/"Strong Avoid"
+// calls, mirroring the long-side mechanics but with the P&L, peak, and
+// stop-loss math inverted (see the isShort branches below). Deliberately a
+// separate, dedicated pool rather than folded into cashByIntent: a short
+// has fundamentally different capital mechanics (profit when price falls,
+// theoretically unbounded loss if it doesn't), so blending its dollars
+// into the same total as the long book would conflate two different
+// claims into one misleading number. Reported on its own via
+// getShortBookSummary, never inside getPortfolioSummary.
+const SHORT_STARTING_CASH = PER_INTENT_STARTING_CASH;
+const SHORT_STOP_LOSS_THRESHOLD_PCT = 25; // inverted sign vs. the long STOP_LOSS_THRESHOLD_PCT — a short is cut when the stock is UP this much, not down
+
 export interface PortfolioState {
   cashByIntent: Record<FundedIntent, number>;
+  cashShort: number;
   startedAt: string;
 }
 
@@ -149,30 +162,41 @@ interface LegacyPortfolioState {
   startedAt: string;
 }
 
-function isLegacyPortfolioState(state: PortfolioState | LegacyPortfolioState): state is LegacyPortfolioState {
+function isLegacyPortfolioState(state: object): state is LegacyPortfolioState {
   return typeof (state as LegacyPortfolioState).cashAvailable === "number";
 }
 
 async function getPortfolio(): Promise<PortfolioState> {
   const existing = await redis.get<PortfolioState | LegacyPortfolioState>(PORTFOLIO_KEY);
   if (existing) {
-    if (!isLegacyPortfolioState(existing)) return existing;
-    // Migrate the old shared pool once. Any cash still sitting unclaimed
-    // in the legacy pool is split evenly between best/quality (the two
-    // intents that were actually drawing from it) since it was never
-    // owned by any one of them specifically.
-    const remainder = existing.cashAvailable / 2;
-    const migrated: PortfolioState = {
-      startedAt: existing.startedAt,
-      cashByIntent: {
-        best: remainder,
-        quality: remainder,
-        undervalued: CORRECTION_INJECTION_PER_INTENT,
-        momentum: CORRECTION_INJECTION_PER_INTENT,
-      },
-    };
-    await redis.set(PORTFOLIO_KEY, migrated);
-    return migrated;
+    if (isLegacyPortfolioState(existing)) {
+      // Migrate the old shared pool once. Any cash still sitting unclaimed
+      // in the legacy pool is split evenly between best/quality (the two
+      // intents that were actually drawing from it) since it was never
+      // owned by any one of them specifically.
+      const remainder = existing.cashAvailable / 2;
+      const migrated: PortfolioState = {
+        startedAt: existing.startedAt,
+        cashByIntent: {
+          best: remainder,
+          quality: remainder,
+          undervalued: CORRECTION_INJECTION_PER_INTENT,
+          momentum: CORRECTION_INJECTION_PER_INTENT,
+        },
+        cashShort: SHORT_STARTING_CASH,
+      };
+      await redis.set(PORTFOLIO_KEY, migrated);
+      return migrated;
+    }
+    // Already on the per-intent shape but from before the short book
+    // existed — top up with its starting cash once, same disclosed-
+    // injection pattern as the earlier migration above.
+    if (existing.cashShort === undefined) {
+      const withShort: PortfolioState = { ...existing, cashShort: SHORT_STARTING_CASH };
+      await redis.set(PORTFOLIO_KEY, withShort);
+      return withShort;
+    }
+    return existing;
   }
   const fresh: PortfolioState = {
     startedAt: new Date().toISOString(),
@@ -182,6 +206,7 @@ async function getPortfolio(): Promise<PortfolioState> {
       best: PER_INTENT_STARTING_CASH,
       quality: PER_INTENT_STARTING_CASH,
     },
+    cashShort: SHORT_STARTING_CASH,
   };
   await redis.set(PORTFOLIO_KEY, fresh);
   return fresh;
@@ -243,37 +268,40 @@ export async function logScreenerCall(params: {
   nudges: ScreenerWhyNudge[];
   monthlyCloses: number[]; // for volatility-adjusted sizing — see targetAllocation
 }): Promise<void> {
-  // "avoid" isn't a recommendation to buy — a track record is fundamentally
-  // about "here's what we told people to consider, did it work out," and an
-  // avoid call inverts that (success = the stock underperforming). Keeping
-  // it out of the permanent log avoids mixing two different claims under
-  // one "track record" umbrella, especially while avoid's calibration is
-  // the newest and least-proven of the intents (see Phase 0).
+  // "avoid" now gets a real short position — see the PortfolioState
+  // comment on cashShort. It used to be excluded entirely (this used to
+  // just be a warning label with no capital behind it); tracked here the
+  // same as every buy-side intent, just drawing from its own dedicated
+  // pool with inverted P&L mechanics (see logShortCredit below, and
+  // updateDailyPeaks/evaluateDueScreenerCalls' isShort branches).
   //
-  // "contrarian" is excluded for a different reason: unlike every other
-  // intent, its "success" direction varies PER PICK (Otto more bullish
-  // than the Street on one stock, more bearish on another) — the current
-  // alpha model (INVERTED_INTENTS below) only supports one fixed direction
-  // per intent. Logging these correctly would need storing each pick's
-  // disagreement direction individually, not just its intent — real scope
-  // beyond building the screen itself, not done here.
-  if (params.intent === "avoid" || params.intent === "contrarian") return;
+  // "contrarian" stays excluded: unlike every other intent, its "success"
+  // direction varies PER PICK (Otto more bullish than the Street on one
+  // stock, more bearish on another) — the current alpha model
+  // (INVERTED_INTENTS below) only supports one fixed direction per intent.
+  // Logging these correctly would need storing each pick's disagreement
+  // direction individually, not just its intent — real scope beyond
+  // building the screen itself, not done here.
+  if (params.intent === "contrarian") return;
+  const isShort = params.intent === "avoid";
   try {
     const onCooldown = await redis.get(cooldownKey(params.intent, params.symbol));
     if (onCooldown) return;
 
-    // Cash allocation: draws only from this intent's own sub-pool, never
-    // another's — see the PortfolioState comment for why. This function is
-    // called sequentially (awaited, not fire-and-forget — see runScreener)
-    // in rank order for each scan's finalists, so the highest-conviction
-    // pick of the batch claims its intent's cash first. A pick is never
-    // skipped or left unlogged just because that intent's sub-pool is low
-    // — that would quietly bias the record toward only well-funded days.
-    // When cash is scarce it just gets a smaller (or $0, "watch only")
-    // stake instead; the call itself is always tracked.
+    // Cash allocation: draws only from this intent's own sub-pool (or the
+    // dedicated short pool for "avoid"), never another's — see the
+    // PortfolioState comment for why. This function is called sequentially
+    // (awaited, not fire-and-forget — see runScreener) in rank order for
+    // each scan's finalists, so the highest-conviction pick of the batch
+    // claims its pool's cash first. A pick is never skipped or left
+    // unlogged just because that pool is low — that would quietly bias the
+    // record toward only well-funded days. When cash is scarce it just
+    // gets a smaller (or $0, "watch only") stake instead; the call itself
+    // is always tracked.
     const portfolio = await getPortfolio();
     const target = targetAllocation(params.compositeScore, params.monthlyCloses);
-    const allocatedAmount = Math.max(0, Math.min(target, portfolio.cashByIntent[params.intent]));
+    const availableCash = isShort ? portfolio.cashShort : portfolio.cashByIntent[params.intent as FundedIntent];
+    const allocatedAmount = Math.max(0, Math.min(target, availableCash));
 
     const now = Date.now();
     const id = `${params.intent}:${params.symbol}:${now}`;
@@ -301,10 +329,18 @@ export async function logScreenerCall(params: {
       redis.zadd(ALL_CALLS_KEY, { score: now, member: id }),
       redis.zadd(intentCallsKey(params.intent), { score: now, member: id }),
       redis.set(cooldownKey(params.intent, params.symbol), true, { ex: COOLDOWN_DAYS * 24 * 60 * 60 }),
-      redis.set(PORTFOLIO_KEY, {
-        ...portfolio,
-        cashByIntent: { ...portfolio.cashByIntent, [params.intent]: portfolio.cashByIntent[params.intent] - allocatedAmount },
-      }),
+      redis.set(
+        PORTFOLIO_KEY,
+        isShort
+          ? { ...portfolio, cashShort: portfolio.cashShort - allocatedAmount }
+          : {
+              ...portfolio,
+              cashByIntent: {
+                ...portfolio.cashByIntent,
+                [params.intent]: portfolio.cashByIntent[params.intent as FundedIntent] - allocatedAmount,
+              },
+            }
+      ),
     ]);
   } catch {
     // Best-effort — losing a track-record entry is a completeness gap for
@@ -333,7 +369,7 @@ export async function resetTrackRecord(): Promise<{ purgedCalls: number }> {
     ...calls.map((c) => redis.del(recordKey(c.id))),
     ...calls.map((c) => redis.del(cooldownKey(c.intent, c.symbol))),
     redis.del(ALL_CALLS_KEY),
-    ...(["undervalued", "momentum", "best", "quality"] as ScreenIntent[]).map((intent) => redis.del(intentCallsKey(intent))),
+    ...(["undervalued", "momentum", "best", "quality", "avoid"] as ScreenIntent[]).map((intent) => redis.del(intentCallsKey(intent))),
   ]);
   const fresh: PortfolioState = {
     startedAt: new Date().toISOString(),
@@ -343,6 +379,7 @@ export async function resetTrackRecord(): Promise<{ purgedCalls: number }> {
       best: PER_INTENT_STARTING_CASH,
       quality: PER_INTENT_STARTING_CASH,
     },
+    cashShort: SHORT_STARTING_CASH,
   };
   await redis.set(PORTFOLIO_KEY, fresh);
   return { purgedCalls: calls.length };
@@ -452,8 +489,12 @@ export interface PortfolioSummary {
  * mechanics are per-intent but the headline number isn't.
  */
 export async function getPortfolioSummary(): Promise<PortfolioSummary> {
-  const [portfolio, callsWithLive] = await Promise.all([getPortfolio(), getScreenerCallsWithLiveMarks()]);
+  const [portfolio, allCallsWithLive] = await Promise.all([getPortfolio(), getScreenerCallsWithLiveMarks()]);
   const cashAvailable = FUNDED_INTENTS.reduce((sum, intent) => sum + portfolio.cashByIntent[intent], 0);
+  // Long-only — "avoid" calls now carry real capital too (see
+  // getShortBookSummary) but are a deliberately separate claim, filtered
+  // out here so they never blend into this total or its counts.
+  const callsWithLive = allCallsWithLive.filter((c) => c.intent !== "avoid");
   const open = callsWithLive.filter((c) => !c.closed);
   const openPositionsValue = open.reduce((sum, c) => {
     const liveReturnPct = c.live?.stockReturnPct ?? 0;
@@ -469,6 +510,45 @@ export async function getPortfolioSummary(): Promise<PortfolioSummary> {
     totalReturnPct: ((totalValue - TOTAL_CONTRIBUTED_CASH) / TOTAL_CONTRIBUTED_CASH) * 100,
     openPositionCount: open.length,
     closedPositionCount: callsWithLive.length - open.length,
+  };
+}
+
+export interface ShortBookSummary {
+  startedAt: string;
+  startingCash: number;
+  cashAvailable: number;
+  openPositionsValue: number;
+  totalValue: number;
+  totalReturnPct: number;
+  openPositionCount: number;
+  closedPositionCount: number;
+}
+
+/**
+ * The short book's own headline, reported separately from
+ * getPortfolioSummary on purpose — see the PortfolioState comment on
+ * cashShort for why blending it into the long total would be misleading.
+ * Value math is inverted from the long side: a short profits when the
+ * stock falls, so openPositionsValue uses (1 - liveReturnPct/100).
+ */
+export async function getShortBookSummary(): Promise<ShortBookSummary> {
+  const [portfolio, allCallsWithLive] = await Promise.all([getPortfolio(), getScreenerCallsWithLiveMarks()]);
+  const shortCalls = allCallsWithLive.filter((c) => c.intent === "avoid");
+  const open = shortCalls.filter((c) => !c.closed);
+  const openPositionsValue = open.reduce((sum, c) => {
+    const liveReturnPct = c.live?.stockReturnPct ?? 0;
+    return sum + c.allocatedAmount * (1 - liveReturnPct / 100);
+  }, 0);
+  const totalValue = portfolio.cashShort + openPositionsValue;
+  return {
+    startedAt: portfolio.startedAt,
+    startingCash: SHORT_STARTING_CASH,
+    cashAvailable: Math.round(portfolio.cashShort),
+    openPositionsValue: Math.round(openPositionsValue),
+    totalValue: Math.round(totalValue),
+    totalReturnPct: ((totalValue - SHORT_STARTING_CASH) / SHORT_STARTING_CASH) * 100,
+    openPositionCount: open.length,
+    closedPositionCount: shortCalls.length - open.length,
   };
 }
 
@@ -546,11 +626,19 @@ export async function updateDailyPeaks(): Promise<{ updated: number; alphaHighs:
       const currentPrice = quote?.price ?? null;
       if (currentPrice === null) continue;
 
+      // "avoid" calls hold a real short position — best case is the price
+      // FALLING, so peakPrice tracks the lowest price seen (not highest),
+      // and the stop-loss/cash-credit math below is mirrored accordingly.
+      // peakAlphaPct needs no branch here: computeAlpha already returns a
+      // bigger number when an avoid call is doing well (see
+      // INVERTED_INTENTS), so "> call.peakAlphaPct" is already correct for
+      // both directions.
+      const isShort = call.intent === "avoid";
       const nowIso = new Date(now).toISOString();
       let peakPrice = call.peakPrice;
       let peakAt = call.peakAt;
       let priceChanged = false;
-      if (currentPrice > call.peakPrice) {
+      if (isShort ? currentPrice < call.peakPrice : currentPrice > call.peakPrice) {
         peakPrice = currentPrice;
         peakAt = nowIso;
         priceChanged = true;
@@ -575,27 +663,39 @@ export async function updateDailyPeaks(): Promise<{ updated: number; alphaHighs:
 
         // Fail-fast on catastrophic single-name breaks — see STOP_LOSS_*
         // comment above. Guarded so a call already closed (d180 or a prior
-        // early exit) is never re-triggered.
+        // early exit) is never re-triggered. A short is cut when the stock
+        // is UP SHORT_STOP_LOSS_THRESHOLD_PCT — the inverted failure mode
+        // of a long position dropping STOP_LOSS_THRESHOLD_PCT.
         const ageDays = (now - new Date(call.calledAt).getTime()) / MS_PER_DAY;
-        if (!call.closed && !call.earlyExit && ageDays < STOP_LOSS_MAX_AGE_DAYS && stockReturnPct <= STOP_LOSS_THRESHOLD_PCT) {
+        const stopLossTriggered = isShort
+          ? stockReturnPct >= SHORT_STOP_LOSS_THRESHOLD_PCT
+          : stockReturnPct <= STOP_LOSS_THRESHOLD_PCT;
+        if (!call.closed && !call.earlyExit && ageDays < STOP_LOSS_MAX_AGE_DAYS && stopLossTriggered) {
           earlyExit = { triggeredAt: nowIso, ageDays, price: currentPrice, stockReturnPct, spyReturnPct, alphaPct: currentAlphaPct };
           closed = true;
-          cashCredit = call.allocatedAmount * (1 + stockReturnPct / 100);
+          // A short's value moves opposite the stock — profit when the
+          // price falls, loss when it rises — the mirror of the long
+          // formula right below in evaluateDueScreenerCalls.
+          cashCredit = isShort ? call.allocatedAmount * (1 - stockReturnPct / 100) : call.allocatedAmount * (1 + stockReturnPct / 100);
         }
       }
 
       if (!priceChanged && !alphaChanged && !earlyExit) continue;
 
       if (earlyExit) {
-        // Cast is safe: logScreenerCall never logs "avoid"/"contrarian", so
-        // every record with a nonzero allocatedAmount (and therefore ever
-        // reaching an early-exit credit) is one of the 4 funded intents.
-        const intent = call.intent as FundedIntent;
         const portfolio = await getPortfolio();
-        await redis.set(PORTFOLIO_KEY, {
-          ...portfolio,
-          cashByIntent: { ...portfolio.cashByIntent, [intent]: portfolio.cashByIntent[intent] + cashCredit },
-        });
+        await redis.set(
+          PORTFOLIO_KEY,
+          isShort
+            ? { ...portfolio, cashShort: portfolio.cashShort + cashCredit }
+            : {
+                ...portfolio,
+                cashByIntent: {
+                  ...portfolio.cashByIntent,
+                  [call.intent]: portfolio.cashByIntent[call.intent as FundedIntent] + cashCredit,
+                },
+              }
+        );
       }
       await redis.set(recordKey(call.id), {
         ...call,
@@ -668,22 +768,33 @@ export async function evaluateDueScreenerCalls(): Promise<{ evaluated: number; c
       for (const m of milestones) newEvaluations[`d${m}`] = evaluation;
 
       // 180 days is the position's full horizon — closing it returns its
-      // real, realized simulated value (stake × (1 + actual stock return))
-      // back to that intent's own sub-pool, freeing capital for that same
-      // intent's future picks instead of leaving it locked in a position
-      // the record has already fully judged. This is the portfolio's only
+      // real, realized simulated value back to that intent's own sub-pool
+      // (or the short pool for "avoid"), freeing capital for that same
+      // pool's future picks instead of leaving it locked in a position the
+      // record has already fully judged. This is the portfolio's only
       // turnover mechanic, anchored on data already collected here, not a
-      // separate exit rule.
+      // separate exit rule. A short's value moves opposite the stock —
+      // profit when price fell, loss when it rose — the mirror of a long
+      // position's payout.
       const closing = milestones.includes(180);
       if (closing) {
-        // Cast is safe — see the identical note on the early-exit credit above.
-        const intent = call.intent as FundedIntent;
+        const isShort = call.intent === "avoid";
         const portfolio = await getPortfolio();
-        const closingValue = call.allocatedAmount * (1 + stockReturnPct / 100);
-        await redis.set(PORTFOLIO_KEY, {
-          ...portfolio,
-          cashByIntent: { ...portfolio.cashByIntent, [intent]: portfolio.cashByIntent[intent] + closingValue },
-        });
+        const closingValue = isShort
+          ? call.allocatedAmount * (1 - stockReturnPct / 100)
+          : call.allocatedAmount * (1 + stockReturnPct / 100);
+        await redis.set(
+          PORTFOLIO_KEY,
+          isShort
+            ? { ...portfolio, cashShort: portfolio.cashShort + closingValue }
+            : {
+                ...portfolio,
+                cashByIntent: {
+                  ...portfolio.cashByIntent,
+                  [call.intent]: portfolio.cashByIntent[call.intent as FundedIntent] + closingValue,
+                },
+              }
+        );
       }
 
       await redis.set(recordKey(call.id), { ...call, evaluations: newEvaluations, closed: closing || call.closed });

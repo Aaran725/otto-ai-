@@ -128,9 +128,12 @@ export function PortfolioPanel({
 
       {loading && <p className="mt-4 text-sm text-otto-text-muted">Checking sector concentration and correlation…</p>}
 
-      {analysis && analysis.sectorConcentration.length === 0 && analysis.correlatedPairs.length === 0 && !loading && watchlist.length >= 2 && (
-        <p className="mt-4 text-sm text-otto-bull">No concentration or correlation flags — reasonably diversified.</p>
-      )}
+      {analysis &&
+        analysis.sectorConcentration.length === 0 &&
+        analysis.correlatedPairs.length === 0 &&
+        analysis.divergentPairs.length === 0 &&
+        !loading &&
+        watchlist.length >= 2 && <p className="mt-4 text-sm text-otto-bull">No concentration or correlation flags — reasonably diversified.</p>}
 
       {analysis && analysis.sectorConcentration.length > 0 && (
         <div className="mt-4">
@@ -158,6 +161,27 @@ export function PortfolioPanel({
                   {p.a} &amp; {p.b}
                 </span>{" "}
                 <span className="text-otto-text-muted">moved together {Math.round(p.correlation * 100)}% of the time — limited diversification benefit holding both.</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {analysis && analysis.divergentPairs.length > 0 && (
+        <div className="mt-4">
+          <h3 className="otto-text-label text-otto-text-faint">Diverging from their usual pattern</h3>
+          <div className="mt-2 space-y-2">
+            {analysis.divergentPairs.map((p) => (
+              <div key={`${p.a}-${p.b}`} className="rounded-lg border border-otto-gold/30 bg-otto-gold-soft px-3 py-2 text-sm">
+                <span className="font-medium text-otto-text">
+                  {p.a} &amp; {p.b}
+                </span>{" "}
+                <span className="text-otto-text-muted">
+                  normally move together ({Math.round(p.correlation * 100)}% correlated), but last month {p.a}{" "}
+                  {p.aLatestReturnPct >= 0 ? "+" : ""}
+                  {p.aLatestReturnPct}% vs {p.b} {p.bLatestReturnPct >= 0 ? "+" : ""}
+                  {p.bLatestReturnPct}% — a real break from their usual pattern, not necessarily a signal either way.
+                </span>
               </div>
             ))}
           </div>

@@ -23,6 +23,16 @@ import { useGlassPointer } from "./useGlassPointer";
 const TABS = ["Overview", "Financials", "Snowflake", "Forecast", "Catalysts"] as const;
 type Tab = (typeof TABS)[number];
 
+// How close a real earnings date has to be before it's worth its own
+// explicit callout instead of sitting as one row in the metrics table —
+// a binary event 14+ days out doesn't change how you should be thinking
+// about the position today the way one landing this week does.
+const UPCOMING_EARNINGS_WINDOW_DAYS = 14;
+
+function daysUntil(iso: string): number {
+  return Math.ceil((new Date(iso).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+}
+
 /**
  * Otto handing you a folder that opens on the table, not a page reload —
  * the compact chat card expands in place into this tabbed sheet, right
@@ -126,6 +136,22 @@ export function ExpandedResearchSheet({
               </div>
               <ConvictionGauge score={analysis.convictionScore} dataQuality={analysis.dataQuality} />
             </div>
+            {analysis.earnings?.nextEarningsDate &&
+              daysUntil(analysis.earnings.nextEarningsDate) >= 0 &&
+              daysUntil(analysis.earnings.nextEarningsDate) <= UPCOMING_EARNINGS_WINDOW_DAYS && (
+                <div className="rounded-lg border border-otto-gold/25 bg-otto-gold-soft px-4 py-3 text-xs text-otto-text-muted">
+                  <span className="font-medium text-otto-gold">
+                    Earnings in {daysUntil(analysis.earnings.nextEarningsDate)}{" "}
+                    day{daysUntil(analysis.earnings.nextEarningsDate) === 1 ? "" : "s"}.{" "}
+                  </span>
+                  A real binary event, not priced into this score the way the rest of the analysis is — expect
+                  volatility either direction around {new Date(analysis.earnings.nextEarningsDate).toLocaleDateString(undefined, {
+                    month: "short",
+                    day: "numeric",
+                  })}
+                  .
+                </div>
+              )}
             {analysis.historicalPrices.some((p) => p.open !== undefined) && (
               <div>
                 <p className="otto-text-label mb-2 text-otto-text-faint">Recent Candles</p>

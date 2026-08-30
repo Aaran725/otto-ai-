@@ -14,13 +14,32 @@ export interface CorrelatedPair {
   correlation: number; // -1 to 1, Pearson correlation of monthly returns
 }
 
+/** A classic stat-arb signal: two names that normally move together just
+ * didn't, over their most recent month. Doesn't say which direction is
+ * "right" — just that the historical relationship broke, which is either
+ * a mean-reversion setup or a sign the relationship itself changed. */
+export interface DivergentPair {
+  a: string;
+  b: string;
+  correlation: number;
+  aLatestReturnPct: number;
+  bLatestReturnPct: number;
+  divergencePct: number; // |aLatestReturnPct - bLatestReturnPct|
+}
+
 export interface PortfolioAnalysis {
   sectorConcentration: SectorConcentration[]; // only entries above the flag threshold
   correlatedPairs: CorrelatedPair[]; // only pairs above the flag threshold
+  divergentPairs: DivergentPair[]; // only pairs above the flag threshold
 }
 
 const CONCENTRATION_FLAG_PCT = 40; // a single SIC bucket over this share of the book gets flagged
 const CORRELATION_FLAG = 0.7;
+// A pair has to actually be correlated (CORRELATION_FLAG) before a gap
+// between their latest returns means anything — an 8pt gap between two
+// unrelated stocks is just noise; the same gap between two names that
+// normally move as one is a real, checkable break in the pattern.
+const DIVERGENCE_FLAG_PCT = 8;
 
 function pearsonCorrelation(a: number[], b: number[]): number | null {
   const n = Math.min(a.length, b.length);
@@ -62,7 +81,7 @@ function monthlyReturns(closes: number[]): number[] {
 export async function analyzePortfolio(symbols: string[]): Promise<PortfolioAnalysis> {
   const uniqueSymbols = [...new Set(symbols.map((s) => s.toUpperCase()))];
   if (uniqueSymbols.length < 2) {
-    return { sectorConcentration: [], correlatedPairs: [] };
+    return { sectorConcentration: [], correlatedPairs: [], divergentPairs: [] };
   }
 
   const [sicResults, priceResults] = await Promise.all([
@@ -86,21 +105,38 @@ export async function analyzePortfolio(symbols: string[]): Promise<PortfolioAnal
     .filter((b) => b.symbols.length >= 2 && b.pct >= CONCENTRATION_FLAG_PCT)
     .sort((a, b) => b.pct - a.pct);
 
-  // Pairwise correlation
+  // Pairwise correlation, and — for pairs that actually are correlated —
+  // whether their most recent month's returns just broke that pattern.
   const returnsBySymbol = new Map(priceResults.map((r) => [r.symbol, monthlyReturns(r.closes)]));
   const correlatedPairs: CorrelatedPair[] = [];
+  const divergentPairs: DivergentPair[] = [];
   for (let i = 0; i < uniqueSymbols.length; i++) {
     for (let j = i + 1; j < uniqueSymbols.length; j++) {
       const a = returnsBySymbol.get(uniqueSymbols[i]);
       const b = returnsBySymbol.get(uniqueSymbols[j]);
       if (!a || !b || a.length < 3 || b.length < 3) continue;
       const corr = pearsonCorrelation(a, b);
-      if (corr !== null && corr >= CORRELATION_FLAG) {
-        correlatedPairs.push({ a: uniqueSymbols[i], b: uniqueSymbols[j], correlation: Math.round(corr * 100) / 100 });
+      if (corr === null || corr < CORRELATION_FLAG) continue;
+      const correlation = Math.round(corr * 100) / 100;
+      correlatedPairs.push({ a: uniqueSymbols[i], b: uniqueSymbols[j], correlation });
+
+      const aLatestReturnPct = a[a.length - 1] * 100;
+      const bLatestReturnPct = b[b.length - 1] * 100;
+      const divergencePct = Math.abs(aLatestReturnPct - bLatestReturnPct);
+      if (divergencePct >= DIVERGENCE_FLAG_PCT) {
+        divergentPairs.push({
+          a: uniqueSymbols[i],
+          b: uniqueSymbols[j],
+          correlation,
+          aLatestReturnPct: Math.round(aLatestReturnPct * 10) / 10,
+          bLatestReturnPct: Math.round(bLatestReturnPct * 10) / 10,
+          divergencePct: Math.round(divergencePct * 10) / 10,
+        });
       }
     }
   }
   correlatedPairs.sort((x, y) => y.correlation - x.correlation);
+  divergentPairs.sort((x, y) => y.divergencePct - x.divergencePct);
 
-  return { sectorConcentration, correlatedPairs };
+  return { sectorConcentration, correlatedPairs, divergentPairs };
 }

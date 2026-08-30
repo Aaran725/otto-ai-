@@ -2,6 +2,7 @@ import Link from "next/link";
 import {
   getScreenerCallsWithLiveMarks,
   getPortfolioSummary,
+  getShortBookSummary,
   getFlagshipSummary,
   getFactorContributions,
   getKilledFactors,
@@ -73,9 +74,10 @@ export default async function ScreenerTrackRecordPage({
     );
   }
 
-  const [calls, portfolio, flagship, factorContributions, killedFactors] = await Promise.all([
+  const [calls, portfolio, shortBook, flagship, factorContributions, killedFactors] = await Promise.all([
     getScreenerCallsWithLiveMarks(),
     getPortfolioSummary(),
+    getShortBookSummary(),
     getFlagshipSummary(),
     getFactorContributions(),
     getKilledFactors(),
@@ -137,6 +139,35 @@ export default async function ScreenerTrackRecordPage({
         allocated in the order picks were made — not a promise about real trading, a real accounting of what this specific
         rule set would be worth today.
       </p>
+
+      <h2 className="otto-text-title mt-8 text-otto-text">Short Book — &quot;Avoid&quot; Calls</h2>
+      <p className="otto-text-caption mt-1 text-otto-text-faint">
+        A separate, real ${shortBook.startingCash.toLocaleString("en-US")} stake behind Otto&apos;s bearish calls —
+        profits when the stock falls, cut early if it&apos;s up 25%+. Kept apart from the long portfolio above since a
+        short has different capital mechanics, not just a flipped sign.
+      </p>
+      <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-3">
+          <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">Short book value</div>
+          <div className="tabular-nums text-lg font-semibold text-otto-text">{fmtDollars(shortBook.totalValue)}</div>
+        </div>
+        <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-3">
+          <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">Return</div>
+          <div className={`tabular-nums text-lg font-semibold ${shortBook.totalReturnPct >= 0 ? "text-otto-bull" : "text-otto-bear"}`}>
+            {fmtPct(shortBook.totalReturnPct)}
+          </div>
+        </div>
+        <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-3">
+          <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">Cash available</div>
+          <div className="tabular-nums text-lg font-semibold text-otto-text">{fmtDollars(shortBook.cashAvailable)}</div>
+        </div>
+        <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-3">
+          <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">Open shorts</div>
+          <div className="tabular-nums text-lg font-semibold text-otto-text">
+            {shortBook.openPositionCount} · {fmtDollars(shortBook.openPositionsValue)}
+          </div>
+        </div>
+      </div>
 
       <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-4">
