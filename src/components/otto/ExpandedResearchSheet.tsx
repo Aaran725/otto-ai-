@@ -139,6 +139,12 @@ export function ExpandedResearchSheet({
                 {analysis.reconciliationNote}
               </div>
             )}
+            {analysis.counterArgument && (
+              <div className="rounded-lg border border-otto-bear/25 bg-otto-bear-soft px-4 py-3 text-xs text-otto-text-muted">
+                <span className="font-medium text-otto-bear">If Otto's wrong. </span>
+                {analysis.counterArgument}
+              </div>
+            )}
             {analysis.positionSizing && analysis.dataQuality !== "insufficient" && (
               <div className="rounded-lg border border-otto-border-soft bg-black/20 px-4 py-3 text-xs text-otto-text-muted">
                 <span className="font-medium text-otto-text">Suggested size: {analysis.positionSizing.suggestedPct}% of book.</span>{" "}
@@ -200,19 +206,41 @@ export function ExpandedResearchSheet({
             <PriceChart data={analysis.historicalPrices} positive={positive} forecast={analysis.forecast} street={analysis.streetConsensus} />
             <p className="text-xs leading-relaxed text-otto-text-faint">{analysis.forecast.rationale}</p>
             {analysis.streetConsensus && (
-              <div className="flex flex-col gap-2 rounded-lg border border-otto-border-soft bg-black/20 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-                <span className="text-xs text-otto-text-muted">Otto vs. The Street</span>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs tabular-nums">
-                  <span className="text-otto-gold">Otto ${analysis.forecast.baseTarget.toFixed(0)}</span>
-                  {analysis.streetConsensus.targetConsensus !== undefined ? (
-                    <span className="text-otto-text">Street ${analysis.streetConsensus.targetConsensus.toFixed(0)}</span>
-                  ) : (
-                    <span className="text-otto-text-faint">no price target available</span>
-                  )}
-                  <span className="text-otto-text-faint">
-                    {analysis.streetConsensus.analystCount} analysts · {analysis.streetConsensus.rating}
-                  </span>
+              <div className="flex flex-col gap-2 rounded-lg border border-otto-border-soft bg-black/20 px-4 py-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <span className="text-xs text-otto-text-muted">Otto vs. The Street</span>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs tabular-nums">
+                    <span className="text-otto-gold">Otto ${analysis.forecast.baseTarget.toFixed(0)}</span>
+                    {analysis.streetConsensus.targetConsensus !== undefined ? (
+                      <span className="text-otto-text">Street ${analysis.streetConsensus.targetConsensus.toFixed(0)}</span>
+                    ) : (
+                      <span className="text-otto-text-faint">no price target available</span>
+                    )}
+                    <span className="text-otto-text-faint">
+                      {analysis.streetConsensus.analystCount} analysts · {analysis.streetConsensus.rating}
+                    </span>
+                  </div>
                 </div>
+                {(analysis.streetConsensus.ratingTrend || analysis.streetConsensus.targetDispersionPct !== undefined) && (
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-otto-border-soft/60 pt-2 text-[11px] text-otto-text-faint">
+                    {analysis.streetConsensus.ratingTrend && analysis.streetConsensus.ratingTrend.direction !== "flat" && (
+                      <span
+                        className={
+                          analysis.streetConsensus.ratingTrend.direction === "improving" ? "text-otto-bull" : "text-otto-bear"
+                        }
+                      >
+                        {analysis.streetConsensus.ratingTrend.direction === "improving" ? "↑" : "↓"} Estimates{" "}
+                        {analysis.streetConsensus.ratingTrend.direction} recently
+                      </span>
+                    )}
+                    {analysis.streetConsensus.targetDispersionPct !== undefined && (
+                      <span>
+                        {analysis.streetConsensus.targetDispersionPct >= 30 ? "Wide disagreement" : "Tight consensus"} — targets
+                        span {analysis.streetConsensus.targetDispersionPct.toFixed(0)}% of the consensus
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             {analysis.streetConsensus && analysis.streetConsensus.analystCount > 0 && (

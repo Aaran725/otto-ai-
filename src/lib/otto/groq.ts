@@ -1,5 +1,5 @@
 import Groq from "groq-sdk";
-import { OTTO_SYSTEM_PROMPT, buildOttoUserPrompt } from "./system-prompt";
+import { OTTO_SYSTEM_PROMPT, buildOttoUserPrompt, OTTO_COUNTER_ARGUMENT_PROMPT, buildCounterArgumentPrompt } from "./system-prompt";
 import type { GroqOttoResponse, OttoAnalysis, OttoSnowflake, StreetConsensus, DataQuality } from "./schema";
 import { getCachedScreenerSnapshot, type ScreenIntent } from "./screener";
 import { recordEvent } from "./observability";
@@ -10,7 +10,7 @@ import { computeMetrics } from "./metrics";
 import { summarizeBundleForPrompt } from "./summarize-bundle";
 import { fetchRiskFactorExcerpt } from "./sec-edgar";
 import { fetchMacroContext } from "./fred";
-import { fetchFinnhubRecommendation, type FinnhubRatingCounts } from "./finnhub";
+import { fetchFinnhubRecommendation, fetchFinnhubRatingTrend, type FinnhubRatingCounts } from "./finnhub";
 import { fetchYahooPriceTarget } from "./yahoo";
 import { fetchPeerValuation } from "./peers";
 import { computeRateSensitivity } from "./macro-sensitivity";
@@ -29,14 +29,17 @@ function ratingFromCounts(c: { strongBuy: number; buy: number; hold: number; sel
   return "Hold";
 }
 
-/**
- * FMP's price-target-consensus/grades-consensus are blocked for some
- * tickers (same whitelist gate as ratios/key-metrics — confirmed on MARA).
- * Finnhub's free recommendation-trends endpoint still gives real rating
- * counts even then — no $ price targets (that's paid on Finnhub too), but
- * a ratings-only "Street" read is more honest than hiding the panel.
- */
-async function computeStreetConsensus(bundle: StockBundle, symbol: string): Promise<StreetConsensus | null> {
+/** (high - low) / consensus as a percent — the real spread already sitting
+ * in targetHigh/targetLow, just never surfaced. Two stocks can show the
+ * identical consensus target while one has every analyst within 5% of it
+ * and the other has them scattered 40% apart; only one of those is a
+ * number worth trusting at face value. */
+function computeTargetDispersionPct(high?: number, low?: number, consensus?: number): number | undefined {
+  if (high === undefined || low === undefined || !consensus) return undefined;
+  return ((high - low) / consensus) * 100;
+}
+
+async function computeStreetConsensusBase(bundle: StockBundle, symbol: string): Promise<StreetConsensus | null> {
   const { priceTargetConsensus: t, gradesConsensus: g } = bundle;
 
   if (t) {
@@ -86,6 +89,32 @@ async function computeStreetConsensus(bundle: StockBundle, symbol: string): Prom
     analystCount,
     rating: ratingFromCounts(finnhubCounts),
     ratingCounts: finnhubCounts,
+  };
+}
+
+/**
+ * FMP's price-target-consensus/grades-consensus are blocked for some
+ * tickers (same whitelist gate as ratios/key-metrics — confirmed on MARA).
+ * Finnhub's free recommendation-trends endpoint still gives real rating
+ * counts even then — no $ price targets (that's paid on Finnhub too), but
+ * a ratings-only "Street" read is more honest than hiding the panel.
+ *
+ * ratingTrend and targetDispersionPct are layered on afterward regardless
+ * of which branch above resolved — the trend fetch (fetchFinnhubRatingTrend,
+ * already built and live in the screener path, just never wired into
+ * single-stock analysis) runs in parallel with the base lookup rather than
+ * after it, and dispersion is pure math on data already present.
+ */
+async function computeStreetConsensus(bundle: StockBundle, symbol: string): Promise<StreetConsensus | null> {
+  const [base, trend] = await Promise.all([
+    computeStreetConsensusBase(bundle, symbol),
+    fetchFinnhubRatingTrend(symbol).catch(() => null),
+  ]);
+  if (!base) return null;
+  return {
+    ...base,
+    ...(trend ? { ratingTrend: trend } : {}),
+    targetDispersionPct: computeTargetDispersionPct(base.targetHigh, base.targetLow, base.targetConsensus),
   };
 }
 
@@ -416,29 +445,55 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
     };
 
     onProgress?.({ id: "writing", text: "Writing the analysis…", icon: "otto" });
-    const groqResponse = await withKeyRotation(async (client) => {
-      const completion = await client.chat.completions.create({
-        model: ANALYSIS_MODEL,
-        temperature: 0.3,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: OTTO_SYSTEM_PROMPT },
-          {
-            role: "user",
-            content: buildOttoUserPrompt(
-              ticker,
-              JSON.stringify(summarizeBundleForPrompt(bundle)),
-              JSON.stringify(computedSignals),
-              filingExcerpt
-            ),
-          },
-        ],
-      });
+    // Run genuinely in parallel — the counter-argument call never sees the
+    // main call's output, so it can't just soften into agreement with
+    // whatever verdict Otto reaches. Same real data (already fetched),
+    // cheaper model (short-seller take, not the full structured analysis).
+    // A counter-argument failure never breaks the main response — it's
+    // real signal worth having, not a hard requirement.
+    const [groqResponse, counterArgument] = await Promise.all([
+      withKeyRotation(async (client) => {
+        const completion = await client.chat.completions.create({
+          model: ANALYSIS_MODEL,
+          temperature: 0.3,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: OTTO_SYSTEM_PROMPT },
+            {
+              role: "user",
+              content: buildOttoUserPrompt(
+                ticker,
+                JSON.stringify(summarizeBundleForPrompt(bundle)),
+                JSON.stringify(computedSignals),
+                filingExcerpt
+              ),
+            },
+          ],
+        });
 
-      const content = completion.choices[0]?.message?.content;
-      if (!content) throw new Error("Empty response from Groq");
-      return JSON.parse(content) as GroqOttoResponse;
-    });
+        const content = completion.choices[0]?.message?.content;
+        if (!content) throw new Error("Empty response from Groq");
+        return JSON.parse(content) as GroqOttoResponse;
+      }),
+      withKeyRotation(async (client) => {
+        const completion = await client.chat.completions.create({
+          model: FOLLOWUP_MODEL,
+          temperature: 0.4,
+          messages: [
+            { role: "system", content: OTTO_COUNTER_ARGUMENT_PROMPT },
+            {
+              role: "user",
+              content: buildCounterArgumentPrompt(
+                ticker,
+                JSON.stringify(summarizeBundleForPrompt(bundle)),
+                JSON.stringify(computedSignals)
+              ),
+            },
+          ],
+        });
+        return completion.choices[0]?.message?.content?.trim() || null;
+      }).catch(() => null),
+    ]);
 
     const { snowflakeNotes, forecastRationale, ...base } = groqResponse;
     // Needs convictionScore, which only exists after Groq responds — pure
@@ -477,6 +532,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       // Overwritten by runOttoAnalysis on every read (cache hit or not) —
       // see its comment for why this can't be computed here and baked in.
       reconciliationNote: null,
+      counterArgument,
       dataQuality,
       historicalPrices: bundle.historicalMonthly.map((p) => ({
         date: p.date,

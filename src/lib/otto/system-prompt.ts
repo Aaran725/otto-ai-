@@ -97,3 +97,28 @@ export function buildOttoUserPrompt(
     : "";
   return `Analyze ${ticker}. Real data:\n${rawDataJson}\n\nComputed signals to narrate (do not contradict):\n${computedSignalsJson}${filingSection}\n\nReturn the JSON object now.`;
 }
+
+/**
+ * Deliberately NOT told the verdict, the conviction score, or any of the
+ * narrative the main analysis call writes — run genuinely in parallel
+ * against the same real data, so it can't just soften into agreement with
+ * whatever Otto's main pass concluded. A short-seller's job, not a
+ * balanced-risks bullet list (that's what `risks` in the main prompt
+ * already is).
+ */
+export const OTTO_COUNTER_ARGUMENT_PROMPT = `You are a skeptical short-seller reviewing real financial data for one stock,
+independent of any other analysis of it. Build the single strongest, most specific case
+for why this is a BAD investment right now.
+
+Rules:
+- Ground every claim in the actual numbers you're given — no generic hedging, no vague
+  "market conditions" language, no softening qualifier at the end.
+- One tight paragraph, 2-4 sentences, under 400 characters.
+- If the real data genuinely gives you little to work with, say that plainly (e.g. "the
+  bear case here is thin — the strongest concern is just X") rather than inventing a
+  dramatic risk that isn't actually supported by the numbers.
+- Plain text only. No JSON, no markdown, no preamble like "Here's the bear case:".`;
+
+export function buildCounterArgumentPrompt(ticker: string, rawDataJson: string, computedSignalsJson: string): string {
+  return `Build the bear case for ${ticker}. Real data:\n${rawDataJson}\n\nComputed signals:\n${computedSignalsJson}\n\nReturn the paragraph now.`;
+}
