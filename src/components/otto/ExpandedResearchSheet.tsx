@@ -286,6 +286,36 @@ export function ExpandedResearchSheet({
                 <InsiderTimeline insiderActivity={analysis.insiderActivity} />
               </div>
             )}
+            {analysis.recentNews && analysis.recentNews.length > 0 && (
+              <div className="border-t border-otto-border-soft pt-5">
+                <p className="otto-text-label mb-1 text-otto-text-faint">Recent News</p>
+                <p className="otto-text-caption mb-3 text-otto-text-faint">
+                  Real, dated web results from the last 7 days — unverified, and never factored into the score above.
+                  Read the source yourself before acting on any of it.
+                </p>
+                <div className="flex flex-col gap-2.5">
+                  {analysis.recentNews.map((n) => (
+                    <a
+                      key={n.url}
+                      href={n.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="rounded-lg border border-otto-border-soft px-3 py-2.5 text-sm transition-colors hover:border-otto-text-faint"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <span className="font-medium text-otto-text">{n.title}</span>
+                        {n.publishedDate && (
+                          <span className="shrink-0 text-[10px] text-otto-text-faint">
+                            {new Date(n.publishedDate).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                          </span>
+                        )}
+                      </div>
+                      <p className="otto-text-caption mt-1 text-otto-text-muted">{n.snippet}</p>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

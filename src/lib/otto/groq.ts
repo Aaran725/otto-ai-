@@ -17,6 +17,7 @@ import { computeRateSensitivity } from "./macro-sensitivity";
 import { fetchEarningsRecord } from "./earnings";
 import { fetchShortInterest } from "./short-interest";
 import { fetchInsiderActivity } from "./insider";
+import { fetchRecentNews } from "./web-search";
 import { computePositionSizing } from "./position-sizing";
 import type { StockBundle } from "./fmp";
 import type { ProgressFn } from "./chat-types";
@@ -336,9 +337,11 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
     onProgress?.({ id: "earnings", text: "Checking earnings beat/miss history…", icon: "finnhub", tracksFinding: true });
     onProgress?.({ id: "shortinterest", text: "Checking short interest…", icon: "finnhub", tracksFinding: true });
     onProgress?.({ id: "insider", text: "Cross-referencing Form 4 insider filings…", icon: "sec", tracksFinding: true });
+    onProgress?.({ id: "news", text: "Checking recent news…", icon: "finnhub", tracksFinding: true });
 
     // Enrichment only — never let a slow/failed fetch block the analysis.
-    const [streetConsensus, filingExcerpt, macro, peerValuation, earnings, shortInterest, insiderActivity] = await Promise.all([
+    const [streetConsensus, filingExcerpt, macro, peerValuation, earnings, shortInterest, insiderActivity, recentNews] =
+      await Promise.all([
       computeStreetConsensus(bundle, bundle.symbol)
         .catch(() => null)
         .then((r) => {
@@ -419,6 +422,20 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
             text: "Cross-referencing Form 4 insider filings…",
             finding: r ? `${r.buys} buys · ${r.sells} sells (180d)` : "No recent insider activity",
             icon: "sec",
+            tracksFinding: true,
+          });
+          return r;
+        }),
+      // Never joins computedSignals below — see web-search.ts for why this
+      // stays out of the LLM prompt and the score entirely.
+      fetchRecentNews(bundle.symbol, bundle.quote.name)
+        .catch(() => null)
+        .then((r) => {
+          onProgress?.({
+            id: "news",
+            text: "Checking recent news…",
+            finding: r ? `${r.length} recent article${r.length === 1 ? "" : "s"} found` : "No recent news found",
+            icon: "finnhub",
             tracksFinding: true,
           });
           return r;
@@ -533,6 +550,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       // see its comment for why this can't be computed here and baked in.
       reconciliationNote: null,
       counterArgument,
+      recentNews,
       dataQuality,
       historicalPrices: bundle.historicalMonthly.map((p) => ({
         date: p.date,

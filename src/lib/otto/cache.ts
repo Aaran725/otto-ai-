@@ -117,6 +117,7 @@ const globalForCache = globalThis as unknown as {
   __ottoSymbolScoreCache?: TtlCache<unknown>;
   __ottoFinnhubFundamentalsCache?: TtlCache<unknown>;
   __ottoDailyPriceCache?: TtlCache<unknown>;
+  __ottoNewsCache?: TtlCache<unknown>;
 };
 
 export function getFmpCache<T>(): TtlCache<T> {
@@ -219,6 +220,16 @@ export function getDailyPriceCache<T>(): TtlCache<T> {
   // scans don't refetch the same ~10 finalist-candidates' daily bars.
   globalForCache.__ottoDailyPriceCache ??= new TtlCache("daily-price", 4 * 60 * 60 * 1000); // 4 h
   return globalForCache.__ottoDailyPriceCache as TtlCache<T>;
+}
+
+export function getNewsCache<T>(): TtlCache<T> {
+  // Short TTL on purpose — this is the one signal in the whole app that's
+  // supposed to go stale fast. Real news from an hour ago is still worth
+  // showing; real news from yesterday afternoon probably isn't "recent"
+  // anymore the way everything else here (filings, financials) can sit
+  // for a day without going wrong.
+  globalForCache.__ottoNewsCache ??= new TtlCache("news", 2 * 60 * 60 * 1000); // 2 h
+  return globalForCache.__ottoNewsCache as TtlCache<T>;
 }
 
 export function getPeerCache<T>(): TtlCache<T> {

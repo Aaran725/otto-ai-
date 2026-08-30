@@ -3,6 +3,7 @@ import type { ShortInterestData } from "./short-interest";
 import type { PositionSizing } from "./position-sizing";
 import type { PeerValuation } from "./peers";
 import type { InsiderActivity } from "./insider";
+import type { NewsResult } from "./web-search";
 
 export type Verdict = "Strong Buy" | "Buy" | "Hold" | "Avoid" | "Strong Avoid";
 
@@ -160,6 +161,14 @@ export interface OttoAnalysis {
   positionSizing: PositionSizing | null;
   peerValuation: PeerValuation | null;
   insiderActivity: InsiderActivity | null;
+  /** Real, dated web results from the last 7 days (Tavily) — deliberately
+   * never fed into the LLM prompt or the score. Unstructured/unverified
+   * web content sits outside this app's "every number traceable to a
+   * primary source" design; shown as its own linked-out panel instead so
+   * it's a real catalyst check, not a silent influence on Otto's own
+   * reasoning. Null when no API key is configured or nothing recent came
+   * back — not the same as "checked, no news." */
+  recentNews: NewsResult[] | null;
   generatedAt: string; // ISO timestamp
   dataQuality: DataQuality;
   /** Explains a real screener-vs-conviction divergence when one exists,
