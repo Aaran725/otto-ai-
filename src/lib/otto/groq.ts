@@ -18,6 +18,7 @@ import { fetchEarningsRecord } from "./earnings";
 import { fetchShortInterest } from "./short-interest";
 import { fetchInsiderActivity } from "./insider";
 import { fetchRecentNews } from "./web-search";
+import { getRecentCatalysts } from "./catalyst-bus";
 import { computePositionSizing } from "./position-sizing";
 import type { StockBundle } from "./fmp";
 import type { ProgressFn } from "./chat-types";
@@ -340,7 +341,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
     onProgress?.({ id: "news", text: "Checking recent news…", icon: "finnhub", tracksFinding: true });
 
     // Enrichment only — never let a slow/failed fetch block the analysis.
-    const [streetConsensus, filingExcerpt, macro, peerValuation, earnings, shortInterest, insiderActivity, recentNews] =
+    const [streetConsensus, filingExcerpt, macro, peerValuation, earnings, shortInterest, insiderActivity, recentNews, recentCatalysts] =
       await Promise.all([
       computeStreetConsensus(bundle, bundle.symbol)
         .catch(() => null)
@@ -440,6 +441,10 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
           });
           return r;
         }),
+      // Cheap single Redis read, not a live fetch — the real detection
+      // already happened in the prewarm cron (catalyst-filings.ts,
+      // insider-feed.ts), this just reads back whatever it found.
+      getRecentCatalysts(bundle.symbol),
     ]);
 
     const metrics = computeMetrics(bundle, peerValuation, earnings, shortInterest);
@@ -459,6 +464,10 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       ...(insiderActivity
         ? { insiderActivity: { direction: insiderActivity.direction, buys: insiderActivity.buys, sells: insiderActivity.sells } }
         : {}),
+      // Real, structured events (SEC item codes, the insider-cluster feed)
+      // — unlike recentNews, this is verified primary-source data, so it's
+      // fair game for the LLM to actually ground a catalyst/risk in.
+      ...(recentCatalysts.length > 0 ? { recentCatalysts: recentCatalysts.map((c) => ({ type: c.type, detail: c.detail })) } : {}),
     };
 
     onProgress?.({ id: "writing", text: "Writing the analysis…", icon: "otto" });
@@ -551,6 +560,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       reconciliationNote: null,
       counterArgument,
       recentNews,
+      recentCatalysts,
       dataQuality,
       historicalPrices: bundle.historicalMonthly.map((p) => ({
         date: p.date,

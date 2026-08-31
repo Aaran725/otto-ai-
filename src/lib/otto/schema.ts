@@ -4,6 +4,7 @@ import type { PositionSizing } from "./position-sizing";
 import type { PeerValuation } from "./peers";
 import type { InsiderActivity } from "./insider";
 import type { NewsResult } from "./web-search";
+import type { CatalystEvent } from "./catalyst-bus";
 
 export type Verdict = "Strong Buy" | "Buy" | "Hold" | "Avoid" | "Strong Avoid";
 
@@ -169,6 +170,14 @@ export interface OttoAnalysis {
    * reasoning. Null when no API key is configured or nothing recent came
    * back — not the same as "checked, no news." */
   recentNews: NewsResult[] | null;
+  /** Real, dated catalyst events (insider clusters, structured 8-K item
+   * codes) published to catalyst-bus.ts within the last 14 days — the
+   * same detection that already triggers early cache invalidation for
+   * this symbol, surfaced back to the user instead of only ever firing
+   * silently in the background. Empty array, not null, when none exist —
+   * this is always "checked," unlike recentNews which depends on an
+   * external API key being configured. */
+  recentCatalysts: CatalystEvent[];
   generatedAt: string; // ISO timestamp
   dataQuality: DataQuality;
   /** Explains a real screener-vs-conviction divergence when one exists,

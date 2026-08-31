@@ -136,6 +136,30 @@ export function ExpandedResearchSheet({
               </div>
               <ConvictionGauge score={analysis.convictionScore} dataQuality={analysis.dataQuality} />
             </div>
+            {analysis.recentCatalysts.length > 0 && (
+              <div className="flex flex-col gap-2">
+                {analysis.recentCatalysts.map((c, i) => (
+                  <div
+                    key={`${c.type}-${c.detectedAt}-${i}`}
+                    className="rounded-lg border border-otto-gold/25 bg-otto-gold-soft px-4 py-3 text-xs text-otto-text-muted"
+                  >
+                    <span className="font-medium text-otto-gold">
+                      {c.type === "insider_cluster" ? "Insider activity flagged. " : "Material filing flagged. "}
+                    </span>
+                    {c.detail} —{" "}
+                    {new Date(c.detectedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}.
+                    {c.sourceUrl && (
+                      <>
+                        {" "}
+                        <a href={c.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-otto-gold underline hover:opacity-80">
+                          View the real filing →
+                        </a>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
             {analysis.earnings?.nextEarningsDate &&
               daysUntil(analysis.earnings.nextEarningsDate) >= 0 &&
               daysUntil(analysis.earnings.nextEarningsDate) <= UPCOMING_EARNINGS_WINDOW_DAYS && (

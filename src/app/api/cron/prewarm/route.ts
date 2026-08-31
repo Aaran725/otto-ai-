@@ -3,7 +3,8 @@ import { fetchSecUniverse, fetchSicCode } from "@/lib/otto/sec-universe";
 import { getSymbolSnapshot } from "@/lib/otto/screener";
 import { mapWithConcurrency } from "@/lib/otto/batch";
 import { fetchInsiderClusterFeed } from "@/lib/otto/insider-feed";
-import { invalidateTodaysAnalysis } from "@/lib/otto/groq";
+import { detectMaterialFilings } from "@/lib/otto/catalyst-filings";
+import { publishCatalystEvents, type CatalystEvent } from "@/lib/otto/catalyst-bus";
 
 /**
  * Daily cron target (see vercel.json) — quietly refreshes the per-symbol
@@ -54,26 +55,43 @@ export async function GET(request: Request) {
   // honestly-scoped sense given Vercel Hobby's one-run-a-day cron limit:
   // a single-stock analysis is cached under a date-scoped key that already
   // rolls over on its own at UTC midnight, so this only ever matters for a
-  // real insider-buying/selling catalyst that lands the SAME calendar day
-  // someone already has a cached read of that symbol — without this, that
-  // stale read would sit there until the date rolls over, not until a real
-  // catalyst actually happened. Reuses the market-wide cluster feed already
-  // built for the screener (no new SEC/Finnhub cost), so this is free.
+  // real catalyst that lands the SAME calendar day someone already has a
+  // cached read of that symbol — without this, that stale read would sit
+  // there until the date rolls over, not until a real catalyst actually
+  // happened. Two independent detectors publish into the same bus
+  // (catalyst-bus.ts) — adding a third later means writing a detector,
+  // not re-implementing what "a catalyst happened" does next.
   const clusterFeed = await fetchInsiderClusterFeed().catch(() => []);
-  const catalystSymbols = clusterFeed.filter((e) => e.buys !== e.sells).map((e) => e.symbol);
+  const clusterEvents: CatalystEvent[] = clusterFeed
+    .filter((e) => e.buys !== e.sells)
+    .map((e) => ({
+      symbol: e.symbol,
+      type: "insider_cluster" as const,
+      detail: e.buys > e.sells ? "Net insider buying (market-wide cluster feed)" : "Net insider selling (market-wide cluster feed)",
+      detectedAt: new Date().toISOString(),
+    }));
 
-  const [snapshotResults, sicResults] = await Promise.all([
+  // Real 8-K item-code sweep — scoped to the SIC batch (60/day, not the
+  // full 150), same conservative-budget discipline as everything else in
+  // this cron: a fresh SEC submissions fetch per symbol shares the same
+  // rate budget as live user traffic, so this must stay small enough to
+  // never itself become the thing that trips a limit.
+  const [snapshotResults, sicResults, filingEventsBySymbol] = await Promise.all([
     mapWithConcurrency(batch, CONCURRENCY, async (c) => getSymbolSnapshot(c.symbol).catch(() => null)),
     mapWithConcurrency(sicBatch, CONCURRENCY, async (c) => fetchSicCode(c.symbol).catch(() => null)),
-    mapWithConcurrency(catalystSymbols, CONCURRENCY, async (symbol) => invalidateTodaysAnalysis(symbol).catch(() => null)),
+    mapWithConcurrency(sicBatch, CONCURRENCY, async (c) => detectMaterialFilings(c.symbol).catch(() => [])),
   ]);
+  const filingEvents = filingEventsBySymbol.flat();
+
+  await publishCatalystEvents([...clusterEvents, ...filingEvents]);
 
   return NextResponse.json({
     warmed: {
       snapshots: snapshotResults.filter((r) => r !== null).length,
       sic: sicResults.filter((r) => r !== null).length,
     },
-    invalidated: catalystSymbols.length,
+    invalidated: clusterEvents.length + filingEvents.length,
+    materialFilings: filingEvents.length,
     batchSize: batch.length,
     universeSize: universe.length,
   });
