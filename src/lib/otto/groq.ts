@@ -283,7 +283,7 @@ const RECONCILIATION_THRESHOLD = 10;
  * getCachedScreenerSnapshot) and the gap is large enough to need
  * explaining, not just labeling.
  */
-function buildReconciliationNoteFromSnapshot(
+export function buildReconciliationNoteFromSnapshot(
   screenerSnap: { compositeScore: number; sf: OttoSnowflakeScores } | null,
   convictionScore: number,
   analysisSf: OttoSnowflakeScores

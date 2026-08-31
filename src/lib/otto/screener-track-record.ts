@@ -415,8 +415,20 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 /** Shared direction logic between the permanent milestone evaluator and the
  * live on-demand viewer below — see INVERTED_INTENTS for why "avoid"
  * flips the comparison. */
-function computeAlpha(intent: ScreenIntent, stockReturnPct: number, spyReturnPct: number): number {
+export function computeAlpha(intent: ScreenIntent, stockReturnPct: number, spyReturnPct: number): number {
   return INVERTED_INTENTS.has(intent) ? spyReturnPct - stockReturnPct : stockReturnPct - spyReturnPct;
+}
+
+/**
+ * The one formula both a short's early stop-loss credit and its d180
+ * close value are built on — extracted so the two call sites can never
+ * silently drift apart, and so it's a pure function real tests can hit
+ * directly instead of only ever being exercised through a live Redis
+ * round-trip. A long profits when the stock rises; a short profits when
+ * it falls — same stake, opposite sign on the same real return.
+ */
+export function positionValue(allocatedAmount: number, stockReturnPct: number, isShort: boolean): number {
+  return isShort ? allocatedAmount * (1 - stockReturnPct / 100) : allocatedAmount * (1 + stockReturnPct / 100);
 }
 
 export interface ScreenerCallWithLive extends ScreenerCallRecord {
@@ -496,10 +508,7 @@ export async function getPortfolioSummary(): Promise<PortfolioSummary> {
   // out here so they never blend into this total or its counts.
   const callsWithLive = allCallsWithLive.filter((c) => c.intent !== "avoid");
   const open = callsWithLive.filter((c) => !c.closed);
-  const openPositionsValue = open.reduce((sum, c) => {
-    const liveReturnPct = c.live?.stockReturnPct ?? 0;
-    return sum + c.allocatedAmount * (1 + liveReturnPct / 100);
-  }, 0);
+  const openPositionsValue = open.reduce((sum, c) => sum + positionValue(c.allocatedAmount, c.live?.stockReturnPct ?? 0, false), 0);
   const totalValue = cashAvailable + openPositionsValue;
   return {
     startedAt: portfolio.startedAt,
@@ -535,10 +544,7 @@ export async function getShortBookSummary(): Promise<ShortBookSummary> {
   const [portfolio, allCallsWithLive] = await Promise.all([getPortfolio(), getScreenerCallsWithLiveMarks()]);
   const shortCalls = allCallsWithLive.filter((c) => c.intent === "avoid");
   const open = shortCalls.filter((c) => !c.closed);
-  const openPositionsValue = open.reduce((sum, c) => {
-    const liveReturnPct = c.live?.stockReturnPct ?? 0;
-    return sum + c.allocatedAmount * (1 - liveReturnPct / 100);
-  }, 0);
+  const openPositionsValue = open.reduce((sum, c) => sum + positionValue(c.allocatedAmount, c.live?.stockReturnPct ?? 0, true), 0);
   const totalValue = portfolio.cashShort + openPositionsValue;
   return {
     startedAt: portfolio.startedAt,
@@ -673,10 +679,7 @@ export async function updateDailyPeaks(): Promise<{ updated: number; alphaHighs:
         if (!call.closed && !call.earlyExit && ageDays < STOP_LOSS_MAX_AGE_DAYS && stopLossTriggered) {
           earlyExit = { triggeredAt: nowIso, ageDays, price: currentPrice, stockReturnPct, spyReturnPct, alphaPct: currentAlphaPct };
           closed = true;
-          // A short's value moves opposite the stock — profit when the
-          // price falls, loss when it rises — the mirror of the long
-          // formula right below in evaluateDueScreenerCalls.
-          cashCredit = isShort ? call.allocatedAmount * (1 - stockReturnPct / 100) : call.allocatedAmount * (1 + stockReturnPct / 100);
+          cashCredit = positionValue(call.allocatedAmount, stockReturnPct, isShort);
         }
       }
 
@@ -780,9 +783,7 @@ export async function evaluateDueScreenerCalls(): Promise<{ evaluated: number; c
       if (closing) {
         const isShort = call.intent === "avoid";
         const portfolio = await getPortfolio();
-        const closingValue = isShort
-          ? call.allocatedAmount * (1 - stockReturnPct / 100)
-          : call.allocatedAmount * (1 + stockReturnPct / 100);
+        const closingValue = positionValue(call.allocatedAmount, stockReturnPct, isShort);
         await redis.set(
           PORTFOLIO_KEY,
           isShort
