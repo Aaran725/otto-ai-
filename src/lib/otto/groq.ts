@@ -19,6 +19,7 @@ import { fetchShortInterest } from "./short-interest";
 import { fetchInsiderActivity } from "./insider";
 import { fetchRecentNews } from "./web-search";
 import { getRecentCatalysts } from "./catalyst-bus";
+import { fetchSegmentAnalysis } from "./segments";
 import { computePositionSizing } from "./position-sizing";
 import type { StockBundle } from "./fmp";
 import type { ProgressFn } from "./chat-types";
@@ -341,8 +342,18 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
     onProgress?.({ id: "news", text: "Checking recent news…", icon: "finnhub", tracksFinding: true });
 
     // Enrichment only — never let a slow/failed fetch block the analysis.
-    const [streetConsensus, filingExcerpt, macro, peerValuation, earnings, shortInterest, insiderActivity, recentNews, recentCatalysts] =
-      await Promise.all([
+    const [
+      streetConsensus,
+      filingExcerpt,
+      macro,
+      peerValuation,
+      earnings,
+      shortInterest,
+      insiderActivity,
+      recentNews,
+      recentCatalysts,
+      segmentAnalysis,
+    ] = await Promise.all([
       computeStreetConsensus(bundle, bundle.symbol)
         .catch(() => null)
         .then((r) => {
@@ -445,6 +456,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       // already happened in the prewarm cron (catalyst-filings.ts,
       // insider-feed.ts), this just reads back whatever it found.
       getRecentCatalysts(bundle.symbol),
+      fetchSegmentAnalysis(bundle.symbol).catch(() => null),
     ]);
 
     const metrics = computeMetrics(bundle, peerValuation, earnings, shortInterest);
@@ -468,6 +480,14 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       // — unlike recentNews, this is verified primary-source data, so it's
       // fair game for the LLM to actually ground a catalyst/risk in.
       ...(recentCatalysts.length > 0 ? { recentCatalysts: recentCatalysts.map((c) => ({ type: c.type, detail: c.detail })) } : {}),
+      ...(segmentAnalysis
+        ? {
+            segmentAnalysis: {
+              topSegmentConcentrationPct: segmentAnalysis.topSegmentConcentrationPct,
+              segments: segmentAnalysis.segments.map((s) => ({ label: s.label, pctOfTotal: s.pctOfTotal, yoyGrowthPct: s.yoyGrowthPct })),
+            },
+          }
+        : {}),
     };
 
     onProgress?.({ id: "writing", text: "Writing the analysis…", icon: "otto" });
@@ -561,6 +581,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       counterArgument,
       recentNews,
       recentCatalysts,
+      segmentAnalysis,
       dataQuality,
       historicalPrices: bundle.historicalMonthly.map((p) => ({
         date: p.date,

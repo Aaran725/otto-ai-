@@ -15,6 +15,7 @@ import { PeerComparisonTable } from "./PeerComparisonTable";
 import { ValuationGaugeCluster } from "./ValuationGaugeCluster";
 import { RatingDonut } from "./RatingDonut";
 import { RevenueMarginChart } from "./RevenueMarginChart";
+import { SegmentBreakdown } from "./SegmentBreakdown";
 import { CashFlowWaterfall } from "./CashFlowWaterfall";
 import { InsiderTimeline } from "./InsiderTimeline";
 import { CandlestickChart } from "./CandlestickChart";
@@ -231,6 +232,11 @@ export function ExpandedResearchSheet({
               <p className="mb-3 otto-text-label text-otto-text-faint">Revenue &amp; Margin</p>
               <RevenueMarginChart data={analysis.fundamentalTrend} />
             </div>
+            {analysis.segmentAnalysis && (
+              <div className="border-t border-otto-border-soft pt-5">
+                <SegmentBreakdown segmentAnalysis={analysis.segmentAnalysis} />
+              </div>
+            )}
             <div className="border-t border-otto-border-soft pt-5">
               <p className="mb-3 otto-text-label text-otto-text-faint">Cash Flow Bridge</p>
               <CashFlowWaterfall data={analysis.fundamentalTrend} />

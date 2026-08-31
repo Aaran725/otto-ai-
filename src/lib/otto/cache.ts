@@ -118,6 +118,7 @@ const globalForCache = globalThis as unknown as {
   __ottoFinnhubFundamentalsCache?: TtlCache<unknown>;
   __ottoDailyPriceCache?: TtlCache<unknown>;
   __ottoNewsCache?: TtlCache<unknown>;
+  __ottoSegmentCache?: TtlCache<unknown>;
 };
 
 export function getFmpCache<T>(): TtlCache<T> {
@@ -230,6 +231,13 @@ export function getNewsCache<T>(): TtlCache<T> {
   // for a day without going wrong.
   globalForCache.__ottoNewsCache ??= new TtlCache("news", 2 * 60 * 60 * 1000); // 2 h
   return globalForCache.__ottoNewsCache as TtlCache<T>;
+}
+
+export function getSegmentCache<T>(): TtlCache<T> {
+  // Real segment revenue only changes on a quarterly filing cadence, same
+  // as income/cash-flow statements — long TTL is honest, not lazy.
+  globalForCache.__ottoSegmentCache ??= new TtlCache("segment", 24 * 60 * 60 * 1000); // 24 h
+  return globalForCache.__ottoSegmentCache as TtlCache<T>;
 }
 
 export function getPeerCache<T>(): TtlCache<T> {

@@ -5,6 +5,7 @@ import type { PeerValuation } from "./peers";
 import type { InsiderActivity } from "./insider";
 import type { NewsResult } from "./web-search";
 import type { CatalystEvent } from "./catalyst-bus";
+import type { SegmentAnalysis } from "./segments";
 
 export type Verdict = "Strong Buy" | "Buy" | "Hold" | "Avoid" | "Strong Avoid";
 
@@ -178,6 +179,11 @@ export interface OttoAnalysis {
    * this is always "checked," unlike recentNews which depends on an
    * external API key being configured. */
   recentCatalysts: CatalystEvent[];
+  /** Real per-segment revenue breakdown, when the company reports one —
+   * see segments.ts for why this is concentration/growth analysis, not a
+   * dollar-valued sum-of-the-parts. Null when FMP has no segment data for
+   * this ticker (most small/mid-caps don't break out product segments). */
+  segmentAnalysis: SegmentAnalysis | null;
   generatedAt: string; // ISO timestamp
   dataQuality: DataQuality;
   /** Explains a real screener-vs-conviction divergence when one exists,
