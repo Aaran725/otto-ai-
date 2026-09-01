@@ -9,6 +9,7 @@ import {
 } from "@/lib/otto/screener-track-record";
 import { ReturnGauge } from "@/components/otto/ReturnGauge";
 import { FactorAlphaBars, type FactorAlphaBarDatum } from "@/components/otto/FactorAlphaBars";
+import { getBanditStatus } from "@/lib/otto/bandit";
 import { PortfolioCompositionDonut, type CompositionDatum } from "@/components/otto/PortfolioCompositionDonut";
 
 const NUDGE_TYPE_LABELS: Record<string, string> = {
@@ -74,13 +75,14 @@ export default async function ScreenerTrackRecordPage({
     );
   }
 
-  const [calls, portfolio, shortBook, flagship, factorContributions, killedFactors] = await Promise.all([
+  const [calls, portfolio, shortBook, flagship, factorContributions, killedFactors, banditStatus] = await Promise.all([
     getScreenerCallsWithLiveMarks(),
     getPortfolioSummary(),
     getShortBookSummary(),
     getFlagshipSummary(),
     getFactorContributions(),
     getKilledFactors(),
+    getBanditStatus(),
   ]);
   calls.sort((a, b) => new Date(b.calledAt).getTime() - new Date(a.calledAt).getTime());
   const flagshipAlpha = flagship.avgLiveAlphaPct ?? flagship.avgD30AlphaPct ?? flagship.avgD90AlphaPct ?? flagship.avgD180AlphaPct;
@@ -200,6 +202,31 @@ export default async function ScreenerTrackRecordPage({
             </>
           )}
         </span>
+      </div>
+
+      <div className="mt-6">
+        <h2 className="otto-text-label text-otto-text-faint">&quot;Best&quot; bandit — 3 formulas competing for real capital</h2>
+        <p className="otto-text-caption mt-1 text-otto-text-faint">
+          Every &quot;best&quot; scan, a real Thompson-sampling draw picks which of 3 weight philosophies gets to make the
+          call — weighted by which has actually earned real alpha at its first evaluated milestone so far, not a fixed
+          formula or a schedule. Each starts at an honest 50% (Beta(1,1), no bias) until real evidence moves it.
+        </p>
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          {banditStatus.map((v) => (
+            <div key={v.variant} className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold capitalize text-otto-text">{v.variant}</span>
+                <span className={`tabular-nums text-lg font-semibold ${v.impliedWinRate >= 50 ? "text-otto-bull" : "text-otto-bear"}`}>
+                  {v.impliedWinRate}%
+                </span>
+              </div>
+              <p className="otto-text-caption mt-1 text-otto-text-faint">
+                {v.realSamples} real evaluated outcome{v.realSamples === 1 ? "" : "s"}
+                {v.realSamples === 0 && " — untested, still exploring"}
+              </p>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="mt-6">

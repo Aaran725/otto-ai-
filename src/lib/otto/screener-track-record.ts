@@ -4,6 +4,7 @@ import { fetchAlpacaHistoricalMonthly } from "./alpaca";
 import { fetchYahooHistoricalMonthly } from "./yahoo";
 import { computePositionSizing } from "./position-sizing";
 import type { ScreenIntent, NudgeType, ScreenerWhyNudge } from "./screener";
+import { recordVariantOutcome, type BestVariant } from "./bandit";
 
 /**
  * Permanent, append-only record of every real screener recommendation —
@@ -75,6 +76,15 @@ export interface ScreenerCallRecord {
     spyReturnPct: number;
     alphaPct: number;
   };
+  // Only set for intent "best" — which of the 3 competing weight
+  // philosophies (see bandit.ts) the live Thompson-sampling bandit chose
+  // for this specific scan. Undefined for every other intent, and for
+  // "best" calls logged before the bandit existed.
+  variant?: BestVariant;
+  // Guards against recording the same call's outcome into the bandit's
+  // posterior more than once — set the moment recordVariantOutcome fires
+  // for this call (its first real evaluated milestone), never again after.
+  variantOutcomeRecorded?: boolean;
 }
 
 // How long the daily peak sweep keeps checking a call — a bit past the
@@ -267,6 +277,7 @@ export async function logScreenerCall(params: {
   isFlagship: boolean;
   nudges: ScreenerWhyNudge[];
   monthlyCloses: number[]; // for volatility-adjusted sizing — see targetAllocation
+  variant?: BestVariant; // only set for intent "best" — see bandit.ts
 }): Promise<void> {
   // "avoid" now gets a real short position — see the PortfolioState
   // comment on cashShort. It used to be excluded entirely (this used to
@@ -323,6 +334,7 @@ export async function logScreenerCall(params: {
       isFlagship: params.isFlagship,
       nudges: params.nudges.map((n) => ({ type: n.type, points: n.points })),
       evaluations: {},
+      ...(params.variant ? { variant: params.variant } : {}),
     };
     await Promise.all([
       redis.set(recordKey(id), record),
@@ -798,7 +810,24 @@ export async function evaluateDueScreenerCalls(): Promise<{ evaluated: number; c
         );
       }
 
-      await redis.set(recordKey(call.id), { ...call, evaluations: newEvaluations, closed: closing || call.closed });
+      // Real evidence for the bandit — fires exactly once per call, at its
+      // FIRST real evaluated milestone (whichever one this sweep actually
+      // hits first for it, typically d30), guarded so a call already
+      // recorded is never counted twice even if this sweep somehow revisits
+      // it. This is the whole mechanism: the bandit's belief about each
+      // variant only ever moves because a real, dated, evaluated outcome
+      // said so — never a schedule, never a human.
+      const variantOutcomeRecorded = call.variantOutcomeRecorded || false;
+      if (call.variant && !variantOutcomeRecorded) {
+        await recordVariantOutcome(call.variant, alphaPct > 0).catch(() => {});
+      }
+
+      await redis.set(recordKey(call.id), {
+        ...call,
+        evaluations: newEvaluations,
+        closed: closing || call.closed,
+        ...(call.variant ? { variantOutcomeRecorded: true } : {}),
+      });
       evaluated += milestones.length;
     } catch {
       // one bad symbol shouldn't sink the whole sweep

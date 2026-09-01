@@ -27,6 +27,7 @@ import type { ScreenQueryRequirements } from "./screen-query";
 import { computeValueScore } from "./value-score";
 import { computeForecastTargets } from "./forecast";
 import { logScreenerCall, getKilledFactors } from "./screener-track-record";
+import { selectVariant, BEST_VARIANT_WEIGHTS, type BestVariant } from "./bandit";
 
 export type ScreenIntent = "undervalued" | "momentum" | "best" | "quality" | "avoid" | "contrarian";
 
@@ -760,7 +761,13 @@ export async function runScreener(
     const pool = await sourceCandidates(intent, theme, capFilter, [...seedTickers, ...buyingSeeds]);
     onProgress?.({ id: "scan", text: `Scanning ${pool.length} tickers…`, icon: "finnhub" });
 
-    const weights = applyRegimeTilt(AXIS_WEIGHTS[intent], macro);
+    // "best" no longer runs one fixed formula — a real Thompson-sampling
+    // bandit (bandit.ts) picks which of 3 competing weight philosophies
+    // gets this scan, weighted by which has actually earned real alpha so
+    // far. Every other intent keeps its own single, unchanged formula.
+    let selectedVariant: BestVariant | null = null;
+    if (intent === "best") selectedVariant = await selectVariant();
+    const weights = applyRegimeTilt(selectedVariant ? BEST_VARIANT_WEIGHTS[selectedVariant] : AXIS_WEIGHTS[intent], macro);
     const clusterBySymbol = new Map(clusterFeed.map((e) => [e.symbol, e]));
     function hasNetInsiderBuying(symbol: string): boolean {
       const entry = clusterBySymbol.get(symbol);
@@ -1342,6 +1349,7 @@ export async function runScreener(
         isFlagship: i === 0,
         nudges: c.whyBreakdown?.nudges ?? [],
         monthlyCloses,
+        ...(selectedVariant ? { variant: selectedVariant } : {}),
       });
     }
 
