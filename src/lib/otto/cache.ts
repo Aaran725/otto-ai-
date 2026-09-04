@@ -33,6 +33,10 @@ class TtlCache<T> {
   // with every concurrent caller for the same key instead of each paying
   // for a duplicate scan.
   private inFlight = new Map<string, Promise<T>>();
+  // Separate map for getOrSetStale's background refresh — its promise
+  // resolves to void (the caller already has a value to serve), so it
+  // can't share the map above without widening every other caller's type.
+  private refreshInFlight = new Map<string, Promise<void>>();
 
   constructor(
     private namespace: string,
@@ -94,6 +98,102 @@ class TtlCache<T> {
     })();
     this.inFlight.set(key, promise);
     return promise;
+  }
+
+  private envelopeKey(key: string): string {
+    return `${this.fullKey(key)}:swr`;
+  }
+
+  private async setFresh(key: string, value: T, hardTtlMs: number): Promise<void> {
+    try {
+      await redis.set(this.envelopeKey(key), { value, computedAt: Date.now() }, { px: hardTtlMs });
+    } catch {
+      // Fail soft, same as everywhere else — worst case the next call just
+      // pays for a real refresh instead of finding this one cached.
+    }
+  }
+
+  /**
+   * Stale-while-revalidate: for a cache whose cold-miss cost is expensive
+   * enough to risk the platform's request timeout (a full screener scan can
+   * run 15-30s+, and rate-limit windows have pushed that past the 80s soft
+   * timeout in production). A plain getOrSet makes the unlucky first caller
+   * after every TTL expiry pay that cost synchronously; this instead serves
+   * the last real, fully-computed result the instant it goes stale and lets
+   * the caller schedule the actual refresh separately (via Next's `after()`,
+   * so it survives past the response instead of racing the function's
+   * teardown) — a live request never blocks on a cold scan unless the key
+   * has genuinely never been computed before.
+   */
+  async getOrSetStale(
+    key: string,
+    fn: () => Promise<T>,
+    opts: { staleAfterMs: number; hardTtlMs: number }
+  ): Promise<{ value: T; isStale: boolean; refresh?: () => Promise<void> }> {
+    let envelope: { value: T; computedAt: number } | undefined;
+    try {
+      envelope = (await redis.get<{ value: T; computedAt: number }>(this.envelopeKey(key))) ?? undefined;
+    } catch {
+      envelope = undefined;
+    }
+
+    if (envelope) {
+      const isStale = Date.now() - envelope.computedAt >= opts.staleAfterMs;
+      if (!isStale) return { value: envelope.value, isStale: false };
+      return { value: envelope.value, isStale: true, refresh: () => this.runRefresh(key, fn, opts.hardTtlMs) };
+    }
+
+    // Never computed before — nothing to serve stale, so this one call has
+    // to pay the real cost, single-flighted the same as plain getOrSet.
+    const existing = this.inFlight.get(key);
+    if (existing) return { value: await existing, isStale: false };
+    const promise = (async () => {
+      try {
+        const value = await fn();
+        await this.setFresh(key, value, opts.hardTtlMs);
+        return value;
+      } finally {
+        this.inFlight.delete(key);
+      }
+    })();
+    this.inFlight.set(key, promise);
+    return { value: await promise, isStale: false };
+  }
+
+  private async runRefresh(key: string, fn: () => Promise<T>, hardTtlMs: number): Promise<void> {
+    const existing = this.refreshInFlight.get(key);
+    if (existing) {
+      await existing.catch(() => {});
+      return;
+    }
+
+    // A stale-serving burst — several requests landing right after the
+    // freshness window closes, each possibly on its own cold-started
+    // instance — would otherwise each independently trigger a full
+    // re-scan: the inFlight map above only coalesces requests on the SAME
+    // warm instance. This Redis lock coalesces across instances too, so
+    // only one of them actually pays for the refresh; the rest just keep
+    // serving the stale value they already had.
+    const lockKey = `${this.envelopeKey(key)}:refreshing`;
+    let acquired = false;
+    try {
+      acquired = (await redis.set(lockKey, "1", { nx: true, px: 5 * 60 * 1000 })) === "OK";
+    } catch {
+      acquired = true; // fail open — a lock hiccup shouldn't block a real refresh
+    }
+    if (!acquired) return;
+
+    const promise = (async () => {
+      try {
+        const value = await fn();
+        await this.setFresh(key, value, hardTtlMs);
+      } finally {
+        this.refreshInFlight.delete(key);
+        await redis.del(lockKey).catch(() => {});
+      }
+    })();
+    this.refreshInFlight.set(key, promise);
+    await promise.catch(() => {});
   }
 }
 

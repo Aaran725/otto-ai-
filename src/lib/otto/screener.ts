@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import { fetchMostActive, fetchBiggestGainers, type FmpRatios, type FmpKeyMetrics, type StockBundle } from "./fmp";
 import {
   fetchFinnhubQuote,
@@ -733,7 +734,8 @@ export async function runScreener(
     .join(":");
   // On a cache hit nothing below runs, so no progress events fire — the
   // scan really is instant then, not staged for show.
-  return getScreenerCache<ScreenerCandidate[]>().getOrSet(cacheKey, async () => {
+  const cache = getScreenerCache<ScreenerCandidate[]>();
+  const scan = async () => {
     // Macro (for regime-tilted weights) and the market-wide insider-cluster
     // feed are both ticker-agnostic — fetched once per scan. A "must have
     // insider buying" request pulls a much wider feed (400 filings vs the
@@ -1364,5 +1366,20 @@ export async function runScreener(
       const note = excerpt.length > 160 ? `${excerpt.slice(0, 157).trimEnd()}…` : excerpt;
       return { ...candidate, filingNote: note };
     });
-  });
+  };
+
+  // Stale-while-revalidate, not a plain cache — a cold scan (wide funnel +
+  // insider + filing checks) has been confirmed live to occasionally push
+  // past the chat route's 80s soft timeout during a Finnhub rate-limit
+  // window. The unlucky first request after every 4h TTL expiry used to eat
+  // that full cost synchronously; now it gets the last real, fully-computed
+  // scan immediately, and the actual re-scan runs via after() so it survives
+  // past this response instead of racing the function's teardown. A key
+  // that's never been computed before still pays the real cost once — there's
+  // nothing to serve stale on a true first-ever call.
+  const STALE_AFTER_MS = 4 * 60 * 60 * 1000;
+  const HARD_TTL_MS = 24 * 60 * 60 * 1000; // keep serving stale for up to 24h if a refresh keeps failing, rather than nothing at all
+  const result = await cache.getOrSetStale(cacheKey, scan, { staleAfterMs: STALE_AFTER_MS, hardTtlMs: HARD_TTL_MS });
+  if (result.isStale && result.refresh) after(result.refresh);
+  return result.value;
 }
