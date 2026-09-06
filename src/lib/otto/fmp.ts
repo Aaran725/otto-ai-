@@ -206,6 +206,7 @@ export interface FmpIncomeStatement {
   fiscalYear: string;
   revenue: number;
   netIncome: number;
+  sharesOutstanding?: number; // diluted weighted-average shares — powers the Piotroski no-dilution check in snowflake.ts
 }
 
 export interface FmpCashFlowStatement {

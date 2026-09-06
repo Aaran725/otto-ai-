@@ -486,7 +486,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 5; // v5: fixed a real, permanent bug (not concurrency) — findRevenueConcept now has a bank-specific fallback, since banks report no standard "Revenues" GAAP tag at all, which silently broke financialsTrend (and Phase A's sector-relative scoring) for every bank screener candidate
+const SCORING_VERSION = 6; // v6: Phase B — Piotroski accrual/dilution checks + evidence-based asymmetric insider buy/sell weight
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
@@ -1088,7 +1088,22 @@ export async function runScreener(
     // one signal that actually measures opportunity size was barely
     // counted. Same logic for SECTOR_NUDGE (real peer-relative cheapness)
     // on "undervalued" specifically.
-    const INSIDER_NUDGE = 4;
+    // Checked Otto's own real track record first (screener-track-record.ts's
+    // getFactorContributions, the same evidence the fail-fast kill switch
+    // reads) before picking a number — every factor, insider included,
+    // still reads "not enough data yet" (the record is ~2 weeks old), so
+    // there's no real evaluated sample to calibrate against yet. Used
+    // real academic research instead as the honest starting point: insider
+    // purchases predict ~+8.9% 12-month outperformance, insider sales
+    // predict ~-5.4% underperformance — a real, asymmetric effect (buying
+    // is the stronger signal), and confirmed live that the old flat ±4
+    // wasn't enough to keep heavy-insider-selling stocks out of
+    // "undervalued"'s top 5 (4 of 5 real picks had real recent selling).
+    // Revisit via getFactorContributions once real evaluated alpha exists
+    // for this factor specifically, rather than trusting outside research
+    // forever.
+    const INSIDER_NUDGE_BUY = 6;
+    const INSIDER_NUDGE_SELL = 5;
     // Stacks on top of INSIDER_NUDGE, not instead of it — a CEO or CFO
     // buying with their own money is a categorically stronger signal than
     // a random VP marked "insider" (see C_SUITE_TITLE_PATTERN in
@@ -1143,9 +1158,9 @@ export async function runScreener(
         });
       }
       if (c.insiderActivity?.direction === "buying")
-        nudges.push({ type: "insider", label: "Insider buying (90d)", points: INSIDER_NUDGE * insiderFreshness });
+        nudges.push({ type: "insider", label: "Insider buying (90d)", points: INSIDER_NUDGE_BUY * insiderFreshness });
       else if (c.insiderActivity?.direction === "selling")
-        nudges.push({ type: "insider", label: "Insider selling (90d)", points: -INSIDER_NUDGE * insiderFreshness });
+        nudges.push({ type: "insider", label: "Insider selling (90d)", points: -INSIDER_NUDGE_SELL * insiderFreshness });
       if (c.insiderActivity?.hasCSuiteBuying) {
         nudges.push({
           type: "officerBuying",

@@ -142,6 +142,40 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
   if (latestIncome !== undefined) {
     growthChecks.push({ label: "Profitable (positive net income)", passed: latestIncome.netIncome > 0 });
   }
+  // Piotroski's accrual check — the single cheapest, most standard
+  // earnings-quality signal in the field, and one Otto was missing
+  // entirely: real cash from operations should back up reported profit.
+  // A company can grow reported net income while its real operating cash
+  // flow lags or shrinks (aggressive revenue recognition, working-capital
+  // games) — this catches "paper growth" that the YoY net-income check
+  // above, taken alone, can't. Zero new fetches: operatingCashFlow is
+  // already on every FmpCashFlowStatement.
+  if (latestIncome !== undefined && latestCashFlow?.operatingCashFlow !== undefined) {
+    growthChecks.push({
+      label: "Cash flow backs up reported profit (CFO > net income)",
+      passed: latestCashFlow.operatingCashFlow > latestIncome.netIncome,
+    });
+  }
+  // Piotroski's other missing check: real dilution quietly erodes
+  // per-share economics even when the headline numbers above all look
+  // fine — a company can grow revenue, net income, and cash flow while
+  // diluting shareholders faster than any of that grows. Currently only
+  // populated via the Finnhub fallback path (fetchFinnhubFinancialsTrend,
+  // verified live against real 10-K concept data); FMP's own
+  // /income-statement raw field for this wasn't verified tonight (FMP's
+  // quota was exhausted), so this check simply won't fire on data sourced
+  // from FMP directly yet — never resolves to a failed check on missing
+  // data, same discipline as every other check here.
+  if (
+    latestIncome?.sharesOutstanding !== undefined &&
+    priorIncome?.sharesOutstanding !== undefined &&
+    priorIncome.sharesOutstanding > 0
+  ) {
+    growthChecks.push({
+      label: "No meaningful share dilution YoY",
+      passed: latestIncome.sharesOutstanding <= priorIncome.sharesOutstanding * 1.02, // 2% slack for routine RSU vesting
+    });
+  }
   const growth = axis(growthChecks);
 
   const qualityChecks: SnowflakeCheck[] = [];

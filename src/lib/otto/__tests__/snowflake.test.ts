@@ -205,6 +205,68 @@ describe("computeSnowflake — growth axis", () => {
     );
     expect(sf.growth.checks.find((c) => c.label === "Net margin expanding")?.passed).toBe(true);
   });
+
+  it("Piotroski accrual check: fails when reported profit outruns real cash from operations", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        income: [{ date: "2025-12-31", fiscalYear: "2025", revenue: 100, netIncome: 20 }],
+        cashFlow: [{ date: "2025-12-31", fiscalYear: "2025", netIncome: 20, freeCashFlow: 5, operatingCashFlow: 8 }],
+      })
+    );
+    expect(sf.growth.checks.find((c) => c.label === "Cash flow backs up reported profit (CFO > net income)")?.passed).toBe(
+      false
+    );
+  });
+
+  it("Piotroski accrual check: passes when real cash from operations exceeds reported profit", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        income: [{ date: "2025-12-31", fiscalYear: "2025", revenue: 100, netIncome: 20 }],
+        cashFlow: [{ date: "2025-12-31", fiscalYear: "2025", netIncome: 20, freeCashFlow: 25, operatingCashFlow: 30 }],
+      })
+    );
+    expect(sf.growth.checks.find((c) => c.label === "Cash flow backs up reported profit (CFO > net income)")?.passed).toBe(
+      true
+    );
+  });
+
+  it("Piotroski no-dilution check: fails on real meaningful share growth YoY", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        income: [
+          { date: "2024-12-31", fiscalYear: "2024", revenue: 100, netIncome: 10, sharesOutstanding: 1_000_000 },
+          { date: "2025-12-31", fiscalYear: "2025", revenue: 110, netIncome: 11, sharesOutstanding: 1_150_000 }, // +15%
+        ],
+      })
+    );
+    expect(sf.growth.checks.find((c) => c.label === "No meaningful share dilution YoY")?.passed).toBe(false);
+  });
+
+  it("Piotroski no-dilution check: passes on flat share count, and tolerates routine RSU vesting within 2%", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        income: [
+          { date: "2024-12-31", fiscalYear: "2024", revenue: 100, netIncome: 10, sharesOutstanding: 1_000_000 },
+          { date: "2025-12-31", fiscalYear: "2025", revenue: 110, netIncome: 11, sharesOutstanding: 1_015_000 }, // +1.5%
+        ],
+      })
+    );
+    expect(sf.growth.checks.find((c) => c.label === "No meaningful share dilution YoY")?.passed).toBe(true);
+  });
+
+  it("neither Piotroski check appears when the underlying data (operatingCashFlow/sharesOutstanding) isn't there", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        income: [
+          { date: "2024-12-31", fiscalYear: "2024", revenue: 100, netIncome: 10 },
+          { date: "2025-12-31", fiscalYear: "2025", revenue: 120, netIncome: 15 },
+        ],
+        cashFlow: [{ date: "2025-12-31", fiscalYear: "2025", netIncome: 15, freeCashFlow: 12 }], // no operatingCashFlow
+      })
+    );
+    expect(sf.growth.checks.find((c) => c.label.includes("Cash flow backs up"))).toBeUndefined();
+    expect(sf.growth.checks.find((c) => c.label.includes("dilution"))).toBeUndefined();
+  });
 });
 
 describe("computeSnowflake — momentum axis technicals fallback", () => {

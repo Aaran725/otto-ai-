@@ -424,8 +424,15 @@ async function fetchFinnhubFinancialsTrendUncached(symbol: string): Promise<Fina
 
     const operatingCashFlow = findConcept(cf, ["us-gaap_NetCashProvidedByUsedInOperatingActivities"]);
     const capex = findConcept(cf, ["us-gaap_PaymentsToAcquirePropertyPlantAndEquipment"]) ?? 0;
+    // Diluted preferred over basic — the real, standard "no dilution" check
+    // (Piotroski) wants the count that includes options/RSUs already in the
+    // money, not the narrower basic count.
+    const sharesOutstanding = findConcept(ic, [
+      "us-gaap_WeightedAverageNumberOfDilutedSharesOutstanding",
+      "us-gaap_WeightedAverageNumberOfSharesOutstandingBasic",
+    ]);
 
-    income.push({ date: entry.endDate, fiscalYear: String(year), revenue, netIncome });
+    income.push({ date: entry.endDate, fiscalYear: String(year), revenue, netIncome, sharesOutstanding });
     cashFlow.push({
       date: entry.endDate,
       fiscalYear: String(year),
