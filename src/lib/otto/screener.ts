@@ -486,7 +486,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 4; // v4: cached fetchFinnhubFinancialsTrend — enrichment branch (peer lookup + sector-relative rescoring) no longer silently skipped under concurrent load
+const SCORING_VERSION = 5; // v5: fixed a real, permanent bug (not concurrency) — findRevenueConcept now has a bank-specific fallback, since banks report no standard "Revenues" GAAP tag at all, which silently broke financialsTrend (and Phase A's sector-relative scoring) for every bank screener candidate
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },

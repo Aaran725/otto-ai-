@@ -338,6 +338,35 @@ function findConcept(items: FinnhubReportConcept[] | undefined, candidates: stri
 }
 
 /**
+ * "Revenue" for whatever this filer actually reports — tries the standard
+ * commercial-company tags first, and falls back to a real bank income
+ * statement's top-line analog (net interest income + noninterest income)
+ * when none of those exist. Confirmed live against a real bank (UMBF):
+ * zero standard revenue tags present at all, so this returned undefined
+ * for every year before the fallback existed, silently breaking the whole
+ * financials trend (and, downstream, Phase A's sector-relative scoring)
+ * for every bank screener candidate. Exported for direct unit testing —
+ * pure, no network.
+ */
+export function findRevenueConcept(ic: FinnhubReportConcept[] | undefined): number | undefined {
+  const standard = findConcept(ic, [
+    "us-gaap_Revenues",
+    "us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax",
+    "us-gaap_RevenueFromContractWithCustomerIncludingAssessedTax",
+    "us-gaap_SalesRevenueNet",
+  ]);
+  if (standard !== undefined) return standard;
+
+  const netInterestIncome = findConcept(ic, [
+    "us-gaap_InterestIncomeExpenseNet",
+    "us-gaap_InterestIncomeExpenseAfterProvisionForLoanLoss",
+  ]);
+  if (netInterestIncome === undefined) return undefined;
+  const noninterestIncome = findConcept(ic, ["us-gaap_NoninterestIncome"]);
+  return netInterestIncome + (noninterestIncome ?? 0);
+}
+
+/**
  * Fallback for the 5-year fundamentals trend when FMP blocks
  * /income-statement and /cash-flow-statement for a ticker (same whitelist
  * pattern as CRWD/RDDT/TEM/MARA). Finnhub's financials-reported endpoint
@@ -389,12 +418,7 @@ async function fetchFinnhubFinancialsTrendUncached(symbol: string): Promise<Fina
     const entry = byYear.get(year)!;
     const { ic, cf } = entry.report;
 
-    const revenue = findConcept(ic, [
-      "us-gaap_Revenues",
-      "us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax",
-      "us-gaap_RevenueFromContractWithCustomerIncludingAssessedTax",
-      "us-gaap_SalesRevenueNet",
-    ]);
+    const revenue = findRevenueConcept(ic);
     const netIncome = findConcept(ic, ["us-gaap_NetIncomeLoss", "us-gaap_ProfitLoss"]);
     if (revenue === undefined || netIncome === undefined) continue;
 
