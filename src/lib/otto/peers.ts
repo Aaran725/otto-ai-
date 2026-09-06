@@ -1,4 +1,4 @@
-import { fetchSicCode, fetchCiksBySic, fetchTickerForCik } from "./sec-universe";
+import { fetchSicCode, fetchCiksBySic, fetchTickerForCik, fetchSicSiblings } from "./sec-universe";
 import { fetchFinnhubFundamentals } from "./finnhub";
 import { mapWithConcurrency } from "./batch";
 import { getPeerCache } from "./cache";
@@ -83,17 +83,36 @@ export interface CurrentMetrics {
 }
 
 /**
- * Real relative-valuation context: pulls the actual list of SEC-registered
- * companies sharing this stock's exact SIC code (via EDGAR's browse-by-SIC
- * endpoint — a direct population, not a guess), resolves each to a ticker,
- * and fetches P/E, P/FCF, P/B, P/S, gross margin, ROIC, and ROE for each
- * from a single Finnhub call per peer (the same /stock/metric response
- * already carries all of them). Cached per SIC code (24h) so the lookup is
- * paid once per industry per day. The P/E percentile stays the required
- * gate (matches the original behavior — no peer lookup without at least
- * that one anchor metric); every other percentile is best-effort and comes
- * back null when either this stock or too few peers lack that number.
+ * One SIC code's real member companies (EDGAR's browse-by-SIC endpoint —
+ * a direct population, not a guess) resolved to tickers, each with a real
+ * P/E, P/FCF, P/B, P/S, gross margin, ROIC, and ROE from a single Finnhub
+ * call per peer (the same /stock/metric response already carries all of
+ * them). No caching here — the caller (fetchPeerRowsForSic) caches the
+ * final, possibly sibling-widened result as one unit.
  */
+async function fetchRowsForExactSic(sic: string, excludeSymbol: string): Promise<PeerRow[]> {
+  const ciks = await fetchCiksBySic(sic);
+  const tickers = await mapWithConcurrency(ciks, RESOLVE_CONCURRENCY, (cik) => fetchTickerForCik(cik));
+  const peerSymbols = tickers
+    .filter((t): t is string => t !== null && t.toUpperCase() !== excludeSymbol.toUpperCase())
+    .slice(0, MAX_PEERS);
+
+  const rows = await mapWithConcurrency(peerSymbols, FETCH_CONCURRENCY, async (sym): Promise<PeerRow | null> => {
+    const fundamentals = await fetchFinnhubFundamentals(sym);
+    if (!fundamentals) return null;
+    const pe = fundamentals.ratios.priceToEarningsRatio;
+    const pfcf = fundamentals.ratios.priceToFreeCashFlowRatio;
+    const roic = fundamentals.keyMetrics.returnOnInvestedCapital;
+    const pb = fundamentals.ratios.priceToBookRatio;
+    const ps = fundamentals.ratios.priceToSalesRatio;
+    const grossMargin = fundamentals.ratios.grossProfitMargin;
+    const roe = fundamentals.keyMetrics.returnOnEquity;
+    if ([pe, pfcf, roic, pb, ps, grossMargin, roe].every((v) => v === undefined)) return null;
+    return { symbol: sym, pe, pfcf, roic, pb, ps, grossMargin, roe };
+  });
+  return rows.filter((r): r is PeerRow => r !== null);
+}
+
 /**
  * The actual expensive part of a peer lookup — resolving a SIC code's real
  * member companies and fetching each one's fundamentals — factored out so
@@ -106,29 +125,33 @@ export interface CurrentMetrics {
  * be unreliable under load: in one real screener scan, only 1 of 5
  * finalists got a real percentile because the other 4's SIC codes weren't
  * warm yet and lost the race to the scan's own concurrent Finnhub usage.
+ *
+ * When the exact SIC still comes back too thin (fewer than 3 real peers),
+ * widens to SEC's own real sibling codes sharing the same 3-digit family
+ * (fetchSicSiblings) before giving up — confirmed live and specific: SIC
+ * 6021 "National Commercial Banks" and 6022 "State Commercial Banks" are
+ * the same real industry, split only by SEC's own classification
+ * granularity. A broad catch-all code (e.g. 7389 "Services-Business
+ * Services, NEC") has no useful family this way and simply stays thin —
+ * this widening helps the "split adjacent codes" case, not every case.
  */
 async function fetchPeerRowsForSic(sic: string, excludeSymbol: string): Promise<PeerRow[]> {
   return getPeerCache<PeerRow[]>().getOrSet(`sic-rows:${sic}`, async () => {
-    const ciks = await fetchCiksBySic(sic);
-    const tickers = await mapWithConcurrency(ciks, RESOLVE_CONCURRENCY, (cik) => fetchTickerForCik(cik));
-    const peerSymbols = tickers
-      .filter((t): t is string => t !== null && t.toUpperCase() !== excludeSymbol.toUpperCase())
-      .slice(0, MAX_PEERS);
+    const rows = await fetchRowsForExactSic(sic, excludeSymbol);
+    if (rows.length >= 3) return rows;
 
-    const rows = await mapWithConcurrency(peerSymbols, FETCH_CONCURRENCY, async (sym): Promise<PeerRow | null> => {
-      const fundamentals = await fetchFinnhubFundamentals(sym);
-      if (!fundamentals) return null;
-      const pe = fundamentals.ratios.priceToEarningsRatio;
-      const pfcf = fundamentals.ratios.priceToFreeCashFlowRatio;
-      const roic = fundamentals.keyMetrics.returnOnInvestedCapital;
-      const pb = fundamentals.ratios.priceToBookRatio;
-      const ps = fundamentals.ratios.priceToSalesRatio;
-      const grossMargin = fundamentals.ratios.grossProfitMargin;
-      const roe = fundamentals.keyMetrics.returnOnEquity;
-      if ([pe, pfcf, roic, pb, ps, grossMargin, roe].every((v) => v === undefined)) return null;
-      return { symbol: sym, pe, pfcf, roic, pb, ps, grossMargin, roe };
-    });
-    return rows.filter((r): r is PeerRow => r !== null);
+    const siblings = await fetchSicSiblings(sic);
+    if (siblings.length === 0) return rows;
+    const siblingRows = await mapWithConcurrency(siblings, 3, (sibSic) => fetchRowsForExactSic(sibSic, excludeSymbol));
+    const seen = new Set(rows.map((r) => r.symbol));
+    const widened = [...rows];
+    for (const row of siblingRows.flat()) {
+      if (seen.has(row.symbol)) continue;
+      seen.add(row.symbol);
+      widened.push(row);
+      if (widened.length >= MAX_PEERS) break;
+    }
+    return widened;
   });
 }
 

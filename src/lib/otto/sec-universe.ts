@@ -250,6 +250,57 @@ export async function fetchCiksBySic(sic: string): Promise<string[]> {
   });
 }
 
+/**
+ * SEC's own, official, complete SIC code list (~430 codes) — a static
+ * government reference table (not live market data), refetched on
+ * getUniverseCache's normal 24h TTL same as everything else here; no need
+ * for a longer override since a daily refetch of ~430 rows is trivially
+ * cheap. Grouped by 3-digit prefix so a caller with a too-thin
+ * exact SIC match (peers.ts: fewer than 3 real registered peers under one
+ * 4-digit code) can widen to the real sibling codes SEC itself groups
+ * together — confirmed live, real, and specific: SIC 6021 "National
+ * Commercial Banks" and 6022 "State Commercial Banks" are the same real
+ * industry split across adjacent codes purely by SEC's own classification
+ * granularity, both sharing the "602" prefix. Not every code has a useful
+ * family this way — a broad catch-all like 7389 "Services-Business
+ * Services, NEC" sits next to unrelated codes like "Photofinishing
+ * Laboratories" in the same 738x prefix, so widening there wouldn't help
+ * and shouldn't be expected to (see peers.ts's caller for how it handles
+ * a still-too-thin result after widening).
+ */
+/** Pure grouping logic, factored out for direct unit testing — no network
+ * involved. A 3-digit code is its own prefix (already as broad as this
+ * grouping gets); a 4-digit code groups under its first 3 digits. */
+export function groupSicCodesByFamily(codes: string[]): Record<string, string[]> {
+  const families: Record<string, string[]> = {};
+  for (const code of codes) {
+    const prefix = code.length === 4 ? code.slice(0, 3) : code;
+    (families[prefix] ??= []).push(code);
+  }
+  return families;
+}
+
+async function fetchSicFamilies(): Promise<Record<string, string[]>> {
+  return getOrSetNonEmpty(getUniverseCache<Record<string, string[]>>(), "sic-families", async () => {
+    const res = await fetch("https://www.sec.gov/search-filings/standard-industrial-classification-sic-code-list", {
+      headers: { "User-Agent": SEC_USER_AGENT },
+    });
+    if (!res.ok) return {};
+    const html = await res.text();
+    const codes = [...html.matchAll(/<tr><td>(\d{3,4})<\/td><td>[^<]*<\/td><td>[^<]*<\/td><\/tr>/g)].map((m) => m[1]);
+    return groupSicCodesByFamily(codes);
+  });
+}
+
+/** Real sibling SIC codes sharing this code's 3-digit family, excluding
+ * the code itself — [] when the list fetch failed or this code has no
+ * real siblings (a lone code in its own 3-digit prefix). */
+export async function fetchSicSiblings(sic: string): Promise<string[]> {
+  const families = await fetchSicFamilies();
+  const prefix = sic.length === 4 ? sic.slice(0, 3) : sic;
+  return (families[prefix] ?? []).filter((s) => s !== sic);
+}
+
 interface SecSubmissionsClassification {
   sic?: string;
   sicDescription?: string;
