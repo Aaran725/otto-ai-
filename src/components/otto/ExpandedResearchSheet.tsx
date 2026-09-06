@@ -16,6 +16,7 @@ import { ValuationGaugeCluster } from "./ValuationGaugeCluster";
 import { RatingDonut } from "./RatingDonut";
 import { RevenueMarginChart } from "./RevenueMarginChart";
 import { SegmentBreakdown } from "./SegmentBreakdown";
+import { GovernmentContractPanel } from "./GovernmentContractPanel";
 import { CashFlowWaterfall } from "./CashFlowWaterfall";
 import { InsiderTimeline } from "./InsiderTimeline";
 import { CandlestickChart } from "./CandlestickChart";
@@ -235,6 +236,11 @@ export function ExpandedResearchSheet({
             {analysis.segmentAnalysis && (
               <div className="border-t border-otto-border-soft pt-5">
                 <SegmentBreakdown segmentAnalysis={analysis.segmentAnalysis} />
+              </div>
+            )}
+            {analysis.governmentContracts && (
+              <div className="border-t border-otto-border-soft pt-5">
+                <GovernmentContractPanel signal={analysis.governmentContracts} />
               </div>
             )}
             <div className="border-t border-otto-border-soft pt-5">

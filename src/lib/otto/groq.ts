@@ -20,6 +20,7 @@ import { fetchInsiderActivity } from "./insider";
 import { fetchRecentNews } from "./web-search";
 import { getRecentCatalysts } from "./catalyst-bus";
 import { fetchSegmentAnalysis } from "./segments";
+import { fetchGovernmentContractSignal } from "./usaspending";
 import { computePositionSizing } from "./position-sizing";
 import type { StockBundle } from "./fmp";
 import type { ProgressFn } from "./chat-types";
@@ -356,6 +357,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       recentNews,
       recentCatalysts,
       segmentAnalysis,
+      governmentContracts,
     ] = await Promise.all([
       computeStreetConsensus(bundle, bundle.symbol)
         .catch(() => null)
@@ -468,6 +470,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       // insider-feed.ts), this just reads back whatever it found.
       getRecentCatalysts(bundle.symbol),
       fetchSegmentAnalysis(bundle.symbol).catch(() => null),
+      fetchGovernmentContractSignal(bundle.quote.name).catch(() => null),
     ]);
 
     const metrics = computeMetrics(bundle, peerValuation, earnings, shortInterest);
@@ -605,6 +608,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       recentNews,
       recentCatalysts,
       segmentAnalysis,
+      governmentContracts,
       dataQuality,
       historicalPrices: bundle.historicalMonthly.map((p) => ({
         date: p.date,

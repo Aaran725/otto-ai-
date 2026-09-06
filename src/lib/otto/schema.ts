@@ -6,6 +6,7 @@ import type { InsiderActivity } from "./insider";
 import type { NewsResult } from "./web-search";
 import type { CatalystEvent } from "./catalyst-bus";
 import type { SegmentAnalysis } from "./segments";
+import type { GovernmentContractSignal } from "./usaspending";
 
 export type Verdict = "Strong Buy" | "Buy" | "Hold" | "Avoid" | "Strong Avoid";
 
@@ -184,6 +185,13 @@ export interface OttoAnalysis {
    * dollar-valued sum-of-the-parts. Null when FMP has no segment data for
    * this ticker (most small/mid-caps don't break out product segments). */
   segmentAnalysis: SegmentAnalysis | null;
+  /** Real trailing-2-fiscal-year federal contract award totals from
+   * USASpending.gov's official API — a revenue-durability signal for the
+   * subset of public companies with real, material government contract
+   * exposure. Null for the overwhelming majority of companies with no
+   * federal contract history at all — "not applicable," not a bad sign,
+   * never fabricated as $0. See usaspending.ts. */
+  governmentContracts: GovernmentContractSignal | null;
   generatedAt: string; // ISO timestamp
   dataQuality: DataQuality;
   /** Explains a real screener-vs-conviction divergence when one exists,
