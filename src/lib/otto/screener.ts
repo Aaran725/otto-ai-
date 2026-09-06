@@ -488,7 +488,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 8; // v8: Phase C — real Altman Z-Score distress check in financialHealth (FMP-primary path only, needs real balance-sheet data); also closed the FMP-side dilution/ebit gap left open in Phase B
+const SCORING_VERSION = 9; // v9: Phase D — real academic 12-1 momentum factor (excludes the most recent month, real short-term-reversal research) in the momentum axis
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },

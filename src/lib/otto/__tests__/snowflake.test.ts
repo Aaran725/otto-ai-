@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeSnowflake, computeAltmanZScore } from "../snowflake";
+import { computeSnowflake, computeAltmanZScore, compute12to1Momentum } from "../snowflake";
 import type { StockBundle } from "../fmp";
 import type { PeerValuation, PeerPercentiles } from "../peers";
 
@@ -399,5 +399,51 @@ describe("computeAltmanZScore — the real, standard 1968 formula", () => {
 
     const withoutBalanceSheet = computeSnowflake(emptyBundle());
     expect(withoutBalanceSheet.financialHealth.checks.some((c) => c.label.includes("Altman Z-Score"))).toBe(false);
+  });
+});
+
+describe("compute12to1Momentum — the real academic factor, not naive 12mo trend", () => {
+  it("stays positive even when the most recent month alone crashed — the whole point of excluding it", () => {
+    // 11 real months of a steady climb, then a sharp drop in month 12 (the
+    // most recent one). A naive "12mo trend" check (price now vs 12mo ago)
+    // would still read this correctly here, but a real reversal case is
+    // exactly why academic momentum research excludes the last month:
+    // short-term reversals shouldn't get to override a real sustained
+    // trend just because the most recent 30 days happened to dip.
+    const monthly = [100, 108, 116, 124, 132, 140, 148, 156, 164, 172, 180, 130]; // last month: 180 -> 130
+    const result = compute12to1Momentum(monthly);
+    expect(result).not.toBeNull();
+    // 12-1 window uses month[0]=100 to month[-2]=180, excluding the crash.
+    expect(result!).toBeCloseTo((180 - 100) / 100, 5);
+    expect(result!).toBeGreaterThan(0);
+  });
+
+  it("returns null with fewer than 7 real months of data — not a fabricated short-window approximation", () => {
+    expect(compute12to1Momentum([100, 105, 110, 108, 112])).toBeNull();
+  });
+
+  it("computes a real negative momentum reading when the 12-1 window itself declined", () => {
+    const monthly = [200, 190, 180, 170, 160, 150, 140, 130];
+    const result = compute12to1Momentum(monthly);
+    expect(result).not.toBeNull();
+    expect(result!).toBeCloseTo((140 - 200) / 200, 5);
+    expect(result!).toBeLessThan(0);
+  });
+
+  it("guards against a zero or negative starting price rather than dividing by it", () => {
+    expect(compute12to1Momentum([0, 10, 20, 30, 40, 50, 60, 70])).toBeNull();
+  });
+
+  it("wires into computeSnowflake's momentum axis only with at least 7 real monthly points", () => {
+    const monthlyPoints = (prices: number[]) =>
+      prices.map((price, i) => ({ symbol: "TEST", date: `2026-${String(i + 1).padStart(2, "0")}-01`, price, volume: 0 }));
+
+    const withEnoughData = computeSnowflake(
+      emptyBundle({ historicalMonthly: monthlyPoints([100, 108, 116, 124, 132, 140, 148, 156]) })
+    );
+    expect(withEnoughData.momentum.checks.some((c) => c.label.includes("12-1 momentum"))).toBe(true);
+
+    const withTooLittleData = computeSnowflake(emptyBundle({ historicalMonthly: monthlyPoints([100, 108, 116]) }));
+    expect(withTooLittleData.momentum.checks.some((c) => c.label.includes("12-1 momentum"))).toBe(false);
   });
 });

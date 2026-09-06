@@ -54,6 +54,28 @@ function yoyGrowth(latest: number, prior: number): number | null {
  * check, since a stock with no peer data shouldn't score worse just for
  * that.
  */
+/**
+ * The real, specific academic momentum factor — not "positive 12-month
+ * trend" (already checked elsewhere in this file), but the heavily-cited
+ * "12 months ago to 1 month ago" formulation: the return window
+ * deliberately EXCLUDES the most recent month, because of a well-
+ * documented short-term reversal effect (a stock that just ran hard
+ * often gives some of it back the following month, and naive trailing
+ * momentum gets that backwards). `monthly` is chronological (oldest
+ * first, one point per month) — same shape as bundle.historicalMonthly.
+ * Requires at least 7 points (same real-data bar computeTechnicals
+ * already uses elsewhere in this file) so this is a genuine multi-month
+ * window, not a 2-month approximation dressed up as "12-1." Pure,
+ * exported for direct testing.
+ */
+export function compute12to1Momentum(monthly: number[]): number | null {
+  if (monthly.length < 7) return null;
+  const twelveMonthsAgo = monthly[0];
+  const oneMonthAgo = monthly[monthly.length - 2]; // second-to-last — excludes the most recent month
+  if (twelveMonthsAgo <= 0) return null;
+  return (oneMonthAgo - twelveMonthsAgo) / twelveMonthsAgo;
+}
+
 function sectorOrAbsolute(percentile: number | null | undefined, sectorLabel: string, fallback: SnowflakeCheck | null): SnowflakeCheck | null {
   if (percentile !== null && percentile !== undefined) {
     return { label: `${sectorLabel} — better than ${100 - percentile}% of real sector peers`, passed: percentile < 50 };
@@ -345,6 +367,13 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
     momentumChecks.push({
       label: "Outperforming the S&P 500 over 13 weeks",
       passed: keyMetrics.relativeStrength13Week > 0,
+    });
+  }
+  const momentum12to1 = compute12to1Momentum(monthly.map((p) => p.price));
+  if (momentum12to1 !== null) {
+    momentumChecks.push({
+      label: "Positive 12-1 momentum (real academic factor, excludes most recent month)",
+      passed: momentum12to1 > 0,
     });
   }
   const momentum = axis(momentumChecks);
