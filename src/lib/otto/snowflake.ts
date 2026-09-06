@@ -62,6 +62,34 @@ function sectorOrAbsolute(percentile: number | null | undefined, sectorLabel: st
 }
 
 /**
+ * The real, standard Altman Z-Score (1968) — a validated 5-ratio
+ * bankruptcy-risk composite, not an invented metric. Z > 2.99 is the
+ * "safe" zone, 1.81-2.99 is "grey," below 1.81 is real distress risk.
+ * Exists specifically to stop a screen from calling a company "cheap"
+ * when it's actually dying — a stock can clear every valuation and
+ * quality check above while still being a real bankruptcy risk. Pure,
+ * exported for direct testing with real historical company figures.
+ */
+export function computeAltmanZScore(inputs: {
+  totalAssets: number;
+  workingCapital: number;
+  retainedEarnings: number;
+  ebit: number;
+  marketCap: number;
+  totalLiabilities: number;
+  revenue: number;
+}): number | null {
+  const { totalAssets, workingCapital, retainedEarnings, ebit, marketCap, totalLiabilities, revenue } = inputs;
+  if (totalAssets <= 0 || totalLiabilities <= 0) return null; // the formula divides by both — not real without them
+  const a = workingCapital / totalAssets;
+  const b = retainedEarnings / totalAssets;
+  const c = ebit / totalAssets;
+  const d = marketCap / totalLiabilities;
+  const e = revenue / totalAssets;
+  return 1.2 * a + 1.4 * b + 3.3 * c + 0.6 * d + 1.0 * e;
+}
+
+/**
  * All five axes are scored from fixed absolute thresholds against real FMP
  * data — no LLM involved. This mirrors Simply Wall St's pass/fail-check
  * methodology: reproducible, explainable, can't hallucinate a number. Every
@@ -71,7 +99,7 @@ function sectorOrAbsolute(percentile: number | null | undefined, sectorLabel: st
  * threshold to a real sector-relative percentile — see `sectorOrAbsolute`.
  */
 export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuation | null): OttoSnowflakeScores {
-  const { quote, ratios, keyMetrics, income, cashFlow } = bundle;
+  const { quote, ratios, keyMetrics, income, cashFlow, balanceSheet } = bundle;
   const pct = peerValuation?.percentiles;
 
   const valuationChecks: SnowflakeCheck[] = [];
@@ -235,6 +263,24 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
   }
   if (keyMetrics?.netDebtToEBITDA !== undefined) {
     financialHealthChecks.push({ label: "Net debt under 3x EBITDA", passed: keyMetrics.netDebtToEBITDA < 3 });
+  }
+  // Real Altman Z-Score — currently FMP-primary-path only, since
+  // balanceSheet is only populated there (see StockBundle's own comment);
+  // the screener's Finnhub-sourced enrichment doesn't get this check yet.
+  const latestBalanceSheet = balanceSheet.at(-1);
+  if (latestBalanceSheet && latestIncome?.ebit !== undefined && quote.marketCap > 0) {
+    const z = computeAltmanZScore({
+      totalAssets: latestBalanceSheet.totalAssets,
+      workingCapital: latestBalanceSheet.totalCurrentAssets - latestBalanceSheet.totalCurrentLiabilities,
+      retainedEarnings: latestBalanceSheet.retainedEarnings,
+      ebit: latestIncome.ebit,
+      marketCap: quote.marketCap,
+      totalLiabilities: latestBalanceSheet.totalLiabilities,
+      revenue: latestIncome.revenue,
+    });
+    if (z !== null) {
+      financialHealthChecks.push({ label: `Altman Z-Score (${z.toFixed(2)}) signals low bankruptcy risk`, passed: z > 1.81 });
+    }
   }
   const financialHealth = axis(financialHealthChecks);
 

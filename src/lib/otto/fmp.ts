@@ -207,6 +207,21 @@ export interface FmpIncomeStatement {
   revenue: number;
   netIncome: number;
   sharesOutstanding?: number; // diluted weighted-average shares — powers the Piotroski no-dilution check in snowflake.ts
+  ebit?: number; // earnings before interest & tax — powers the Altman Z-Score distress check in snowflake.ts
+}
+
+/** Real balance-sheet totals, confirmed live against FMP's actual
+ * /balance-sheet-statement response — the inputs the standard Altman
+ * Z-Score formula needs (snowflake.ts). Otto never fetched this endpoint
+ * before Phase C; only the exact fields the formula uses are mapped. */
+export interface FmpBalanceSheetStatement {
+  date: string;
+  fiscalYear: string;
+  totalAssets: number;
+  totalCurrentAssets: number;
+  totalCurrentLiabilities: number;
+  totalLiabilities: number;
+  retainedEarnings: number;
 }
 
 export interface FmpCashFlowStatement {
@@ -216,6 +231,21 @@ export interface FmpCashFlowStatement {
   freeCashFlow: number;
   operatingCashFlow?: number;
   capex?: number; // always a positive magnitude, regardless of the source's sign convention
+}
+
+/** Raw FMP /income-statement shape — ebit, weightedAverageShsOut, and
+ * weightedAverageShsOutDil are real fields (confirmed live) that the old
+ * FmpIncomeStatement interface discarded even though FMP already returns
+ * them. ebit maps straight through (same name); the shares fields get
+ * mapped into sharesOutstanding below, diluted preferred over basic. */
+interface FmpIncomeStatementRaw {
+  date: string;
+  fiscalYear: string;
+  revenue: number;
+  netIncome: number;
+  ebit?: number;
+  weightedAverageShsOut?: number;
+  weightedAverageShsOutDil?: number;
 }
 
 /** Raw FMP /cash-flow-statement shape — netCashProvidedByOperatingActivities
@@ -243,6 +273,11 @@ export interface StockBundle {
   historicalMonthly: FmpHistoricalPricePoint[];
   income: FmpIncomeStatement[];
   cashFlow: FmpCashFlowStatement[];
+  // Only populated on the FMP-primary path (buildStockBundle) — the
+  // screener's Finnhub-only path (buildFinnhubBundle) leaves this [],
+  // same as every other FMP-only field here. computeSnowflake's Altman
+  // Z-Score check only fires when this is non-empty, never on missing data.
+  balanceSheet: FmpBalanceSheetStatement[];
 }
 
 /**
@@ -360,7 +395,7 @@ async function buildFallbackProfile(symbol: string): Promise<FmpProfile | null> 
 }
 
 async function buildStockBundle(symbol: string): Promise<StockBundle> {
-  const [profile, quoteExtras, ratios, keyMetrics, priceTargetConsensus, gradesConsensus, historical, income, cashFlow, finnhubFundamentals] =
+  const [profile, quoteExtras, ratios, keyMetrics, priceTargetConsensus, gradesConsensus, historical, income, cashFlow, balanceSheet, finnhubFundamentals] =
       await Promise.all([
         fmpGetOptional<FmpProfile[]>("/profile", { symbol }, []),
         fmpGetOptional<FmpQuote[]>("/quote", { symbol }, []),
@@ -369,8 +404,9 @@ async function buildStockBundle(symbol: string): Promise<StockBundle> {
         fmpGetOptional<FmpPriceTargetConsensus[]>("/price-target-consensus", { symbol }, []),
         fmpGetOptional<FmpGradesConsensus[]>("/grades-consensus", { symbol }, []),
         fmpGetOptional<FmpHistoricalPricePoint[]>("/historical-price-eod/light", { symbol }, []),
-        fmpGetOptional<FmpIncomeStatement[]>("/income-statement", { symbol, limit: "5" }, []),
+        fmpGetOptional<FmpIncomeStatementRaw[]>("/income-statement", { symbol, limit: "5" }, []),
         fmpGetOptional<FmpCashFlowStatementRaw[]>("/cash-flow-statement", { symbol, limit: "5" }, []),
+        fmpGetOptional<FmpBalanceSheetStatement[]>("/balance-sheet-statement", { symbol, limit: "1" }, []),
         // Always fetched (not just as a last-resort fallback) — cheap, cached
         // at the source across the whole app — so the single-stock path can
         // backfill the same real 13/26-week momentum fields the screener
@@ -436,7 +472,17 @@ async function buildStockBundle(symbol: string): Promise<StockBundle> {
       priceAvg200: q?.priceAvg200,
     };
 
-    let resolvedIncome = (income ?? []).slice().reverse();
+    let resolvedIncome: FmpIncomeStatement[] = (income ?? [])
+      .slice()
+      .reverse()
+      .map((i) => ({
+        date: i.date,
+        fiscalYear: i.fiscalYear,
+        revenue: i.revenue,
+        netIncome: i.netIncome,
+        ebit: i.ebit,
+        sharesOutstanding: i.weightedAverageShsOutDil ?? i.weightedAverageShsOut,
+      }));
     let resolvedCashFlow: FmpCashFlowStatement[] = (cashFlow ?? [])
       .slice()
       .reverse()
@@ -493,6 +539,7 @@ async function buildStockBundle(symbol: string): Promise<StockBundle> {
       historicalMonthly: resolvedHistorical,
       income: resolvedIncome,
       cashFlow: resolvedCashFlow,
+      balanceSheet: balanceSheet ?? [],
   };
 }
 

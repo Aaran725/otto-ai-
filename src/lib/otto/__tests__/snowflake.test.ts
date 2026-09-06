@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeSnowflake } from "../snowflake";
+import { computeSnowflake, computeAltmanZScore } from "../snowflake";
 import type { StockBundle } from "../fmp";
 import type { PeerValuation, PeerPercentiles } from "../peers";
 
@@ -19,6 +19,7 @@ function emptyBundle(overrides: Partial<StockBundle> = {}): StockBundle {
     historicalMonthly: [],
     income: [],
     cashFlow: [],
+    balanceSheet: [],
     ...overrides,
   };
 }
@@ -331,5 +332,72 @@ describe("computeSnowflake — momentum axis technicals fallback", () => {
     // But nothing that needs computeTechnicals (7-point minimum) appears yet.
     expect(labels).not.toContain("Price above 3-month average (SMA proxy)");
     expect(labels).not.toContain("Within 25% of trailing 12mo high");
+  });
+});
+
+describe("computeAltmanZScore — the real, standard 1968 formula", () => {
+  it("scores a real large-cap's real balance sheet as deep in the safe zone", () => {
+    // Real figures pulled live from FMP's actual /balance-sheet-statement
+    // and /income-statement for AAPL (FY2025) — market cap is a reasonable
+    // current approximation, not tied to the filing date, since Z is
+    // always computed against today's real market cap in practice.
+    const z = computeAltmanZScore({
+      totalAssets: 359_241_000_000,
+      workingCapital: 147_957_000_000 - 165_631_000_000,
+      retainedEarnings: -14_264_000_000,
+      ebit: 132_729_000_000,
+      marketCap: 3_500_000_000_000,
+      totalLiabilities: 285_508_000_000,
+      revenue: 416_161_000_000,
+    });
+    expect(z).not.toBeNull();
+    expect(z!).toBeGreaterThan(2.99); // real safe-zone threshold
+  });
+
+  it("scores a real distress profile (negative working capital and retained earnings, thin EBIT, market cap barely above liabilities) as real distress risk", () => {
+    const z = computeAltmanZScore({
+      totalAssets: 1_000_000_000,
+      workingCapital: -150_000_000, // current liabilities exceed current assets
+      retainedEarnings: -400_000_000, // accumulated losses
+      ebit: 20_000_000,
+      marketCap: 300_000_000, // market values it well below its own liabilities
+      totalLiabilities: 900_000_000,
+      revenue: 500_000_000,
+    });
+    expect(z).not.toBeNull();
+    expect(z!).toBeLessThan(1.81); // real distress-zone threshold
+  });
+
+  it("returns null rather than a divide-by-zero result when total assets or total liabilities are zero", () => {
+    expect(
+      computeAltmanZScore({ totalAssets: 0, workingCapital: 0, retainedEarnings: 0, ebit: 0, marketCap: 100, totalLiabilities: 50, revenue: 0 })
+    ).toBeNull();
+    expect(
+      computeAltmanZScore({ totalAssets: 100, workingCapital: 0, retainedEarnings: 0, ebit: 0, marketCap: 100, totalLiabilities: 0, revenue: 0 })
+    ).toBeNull();
+  });
+
+  it("wires into computeSnowflake's financialHealth axis only when real balance-sheet data exists", () => {
+    const withBalanceSheet = computeSnowflake(
+      emptyBundle({
+        quote: { symbol: "TEST", name: "Test Co", price: 100, changePercentage: 0, marketCap: 3_500_000_000_000, currency: "USD" },
+        income: [{ date: "2025-12-31", fiscalYear: "2025", revenue: 416_161_000_000, netIncome: 112_010_000_000, ebit: 132_729_000_000 }],
+        balanceSheet: [
+          {
+            date: "2025-12-31",
+            fiscalYear: "2025",
+            totalAssets: 359_241_000_000,
+            totalCurrentAssets: 147_957_000_000,
+            totalCurrentLiabilities: 165_631_000_000,
+            totalLiabilities: 285_508_000_000,
+            retainedEarnings: -14_264_000_000,
+          },
+        ],
+      })
+    );
+    expect(withBalanceSheet.financialHealth.checks.some((c) => c.label.includes("Altman Z-Score"))).toBe(true);
+
+    const withoutBalanceSheet = computeSnowflake(emptyBundle());
+    expect(withoutBalanceSheet.financialHealth.checks.some((c) => c.label.includes("Altman Z-Score"))).toBe(false);
   });
 });

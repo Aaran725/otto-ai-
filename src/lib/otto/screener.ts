@@ -423,6 +423,7 @@ export async function buildFinnhubBundle(symbol: string): Promise<StockBundle | 
     historicalMonthly: [],
     income: [],
     cashFlow: [],
+    balanceSheet: [], // Finnhub's financials-reported has no clean balance-sheet equivalent yet — Altman Z stays FMP-only for now
   };
 }
 
@@ -487,7 +488,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 7; // v7: Phase H — real-time Kalshi-implied fed funds rate feeds applyRegimeTilt instead of/alongside FRED's backward-looking reading
+const SCORING_VERSION = 8; // v8: Phase C — real Altman Z-Score distress check in financialHealth (FMP-primary path only, needs real balance-sheet data); also closed the FMP-side dilution/ebit gap left open in Phase B
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
@@ -980,6 +981,7 @@ export async function runScreener(
           historicalMonthly: monthlyHistory,
           income: financialsTrend.income,
           cashFlow: financialsTrend.cashFlow,
+          balanceSheet: [], // Finnhub-sourced enrichment — no clean balance-sheet equivalent yet, see buildFinnhubBundle
         };
         const sf = computeSnowflake(enrichedBundle, peerValuation);
         // Otto's own conservative forecast (same deterministic model used on
