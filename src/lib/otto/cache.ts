@@ -219,6 +219,7 @@ const globalForCache = globalThis as unknown as {
   __ottoDailyPriceCache?: TtlCache<unknown>;
   __ottoNewsCache?: TtlCache<unknown>;
   __ottoSegmentCache?: TtlCache<unknown>;
+  __ottoTrackRecordSummaryCache?: TtlCache<unknown>;
 };
 
 export function getFmpCache<T>(): TtlCache<T> {
@@ -346,4 +347,14 @@ export function getPeerCache<T>(): TtlCache<T> {
   // classification pass affordable inside a single-stock lookup at all.
   globalForCache.__ottoPeerCache ??= new TtlCache("peer", 24 * 60 * 60 * 1000); // 24 h
   return globalForCache.__ottoPeerCache as TtlCache<T>;
+}
+
+export function getTrackRecordSummaryCache<T>(): TtlCache<T> {
+  // getFlagshipSummary/getPortfolioSummary both call
+  // getScreenerCallsWithLiveMarks internally — a live Finnhub quote per
+  // open call. Cheap to compute once, too expensive to redo on every
+  // screener response a user triggers; the underlying numbers don't move
+  // fast enough to need fresher than this anyway.
+  globalForCache.__ottoTrackRecordSummaryCache ??= new TtlCache("track-record-summary", 20 * 60 * 1000); // 20 min
+  return globalForCache.__ottoTrackRecordSummaryCache as TtlCache<T>;
 }

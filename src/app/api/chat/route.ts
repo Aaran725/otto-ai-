@@ -3,6 +3,7 @@ import { runOttoAnalysis, runOttoFollowUp } from "@/lib/otto/groq";
 import { resolveExplicitTickers, resolveTickerByFuzzyName, type ResolvedTicker } from "@/lib/otto/resolve-ticker";
 import { looksLikeFreshRequest, detectFollowUpTopic, buildFollowUpVisual } from "@/lib/otto/followup-intent";
 import { detectScreenIntent, detectThemeFilter, detectCapFilter, intentLabel, runScreener, type CapFilter } from "@/lib/otto/screener";
+import { getCachedTrackRecordSummary } from "@/lib/otto/screener-track-record";
 import { interpretScreenQuery, themeQueryToFilter, verifySeedTickers } from "@/lib/otto/screen-query";
 import { recordEvent } from "@/lib/otto/observability";
 import type { ChatRequestBody, ChatStreamEvent, ProgressFn } from "@/lib/otto/chat-types";
@@ -226,6 +227,10 @@ export async function POST(request: Request) {
             const label = [capFilter?.label, theme?.label].filter(Boolean).join(" ") || null;
             const fullLabel = label ? `${label} — ${intentLabel(screenIntent)}` : intentLabel(screenIntent);
             const top = results[0];
+            // Real, cached (20min) proof strip — never computed fresh per
+            // request, since it's built on a live Finnhub quote per open
+            // call. A failure here is a missing strip, not a broken screen.
+            const trackRecordSummary = await getCachedTrackRecordSummary().catch(() => undefined);
             // A gated intent (undervalued/best) that came back with fewer
             // than 5 real picks should say so, not silently present a
             // shorter list as if 5 was never the target — same honesty
@@ -242,6 +247,7 @@ export async function POST(request: Request) {
                 intentLabel: fullLabel,
                 results: results.map((r, i) => ({ rank: i + 1, ...r })),
                 isAvoidList: screenIntent === "avoid",
+                trackRecordSummary,
               },
             });
             closeOnce();

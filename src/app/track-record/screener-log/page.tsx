@@ -23,15 +23,21 @@ const NUDGE_TYPE_LABELS: Record<string, string> = {
   shortInterest: "Short interest risk",
 };
 
-export const metadata = { title: "Screener Track Record (private) — Otto AI" };
+export const metadata = { title: "Otto's Track Record — every real pick, unedited" };
 export const dynamic = "force-dynamic";
 
 /**
- * Private, human-readable view of the permanent screener track record
- * (Phase 1b) — the raw JSON API (/api/track-record/screener-log) still
- * exists for programmatic access, but this is the actual "where do I check"
- * answer: a real page instead of asking someone to read JSON. Gated the
- * same way (METRICS_SECRET), deliberately not linked from anywhere public.
+ * The public, human-readable view of the permanent screener track record —
+ * the raw JSON API (/api/track-record/screener-log) still exists for
+ * programmatic access, but this is the actual "where do I check" answer: a
+ * real page instead of asking someone to read JSON. Now linked from the
+ * main nav (see ChatApp.tsx) — it was built and left unlinked earlier this
+ * session ("private," gated behind METRICS_SECRET) before there was
+ * anywhere else in the product surfacing real evidence, so hiding it was
+ * reasonable at the time. The gate stays in the code as a harmless kill
+ * switch (unset in both local and production env right now, so it's
+ * already fully open either way) — this page IS the credibility surface a
+ * user needs when a screener result looks unfamiliar.
  */
 function fmtPct(n: number | undefined | null) {
   if (n === undefined || n === null) return "—";
@@ -105,9 +111,10 @@ export default async function ScreenerTrackRecordPage({
       <Link href="/" className="otto-text-caption text-otto-gold hover:opacity-80">
         ← Back to Otto
       </Link>
-      <h1 className="otto-text-display mt-6">Screener Track Record</h1>
+      <h1 className="otto-text-display mt-6">Otto&apos;s Track Record</h1>
       <p className="otto-text-caption mt-2 text-otto-text-faint">
-        Private — every real screener pick Otto has made, unedited. {calls.length} logged.
+        Every real screener pick Otto has made, unedited — nothing curated out, nothing quietly reset. {calls.length}{" "}
+        logged.
       </p>
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-5">

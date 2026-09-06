@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { clsx } from "clsx";
 import type { ChatMessage, ChatStreamEvent, ProgressUpdate, StageIcon } from "@/lib/otto/chat-types";
 import type { ScreenIntent } from "@/lib/otto/screener";
@@ -282,11 +283,25 @@ export function ChatApp() {
             Watchlist{watchlist.length > 0 ? ` (${watchlist.length})` : ""}
           </button>
           <div className="h-3.5 w-px bg-otto-border" />
+          {/* Otto's real, global, permanent ledger — every screener pick ever
+              made, real evaluated alpha vs SPY, the live bandit standings.
+              This used to be shadowed by a same-labeled button that opened
+              the personal call-log panel below, which reads empty for any
+              visitor who hasn't looked up a single stock yet — the actual
+              proof of "this isn't random" was one click further than
+              anyone would ever find it. */}
+          <Link
+            href="/track-record/screener-log"
+            className="otto-text-caption rounded-full px-3 py-1 text-otto-text-muted transition-colors hover:text-otto-text"
+          >
+            Track Record
+          </Link>
+          <div className="h-3.5 w-px bg-otto-border" />
           <button
             onClick={() => setPanel("track-record")}
             className="otto-text-caption rounded-full px-3 py-1 text-otto-text-muted transition-colors hover:text-otto-text"
           >
-            Track Record{callLog.length > 0 ? ` (${callLog.length})` : ""}
+            My Lookups{callLog.length > 0 ? ` (${callLog.length})` : ""}
           </button>
           <div className="h-3.5 w-px bg-otto-border" />
           {user ? (

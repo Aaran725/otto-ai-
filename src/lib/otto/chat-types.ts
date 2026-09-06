@@ -10,6 +10,7 @@ import type {
 import type { PeerValuation } from "./peers";
 import type { InsiderActivity } from "./insider";
 import type { ScreenerWhyBreakdown, ScreenIntent } from "./screener";
+import type { TrackRecordSummary } from "./screener-track-record";
 
 /** A small, targeted visual answering one follow-up question about a stock
  * already discussed — deliberately smaller than the full OttoCardCompact,
@@ -60,6 +61,7 @@ export interface ScreenerResults {
   intentLabel: string; // e.g. "Undervalued picks"
   results: ScreenerResultItem[];
   isAvoidList?: boolean; // inverts score coloring — a "least bad" score still isn't good
+  trackRecordSummary?: TrackRecordSummary; // real, cached proof strip — see getCachedTrackRecordSummary
 }
 
 /** 2-3 full single-stock analyses run side by side from one message ("PLTR

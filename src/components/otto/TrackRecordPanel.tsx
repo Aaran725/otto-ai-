@@ -82,7 +82,11 @@ export function TrackRecordPanel({ calls }: { calls: LoggedCall[] }) {
   if (withPrices.length === 0) {
     return (
       <p className="text-sm text-otto-text-muted">
-        No calls logged yet — every fresh stock lookup gets recorded here automatically.
+        No lookups yet in this browser — every fresh stock lookup gets recorded here automatically. In the meantime,{" "}
+        <a href="/track-record/screener-log" className="font-medium text-otto-gold hover:underline">
+          see Otto's real, public track record
+        </a>
+        .
       </p>
     );
   }
@@ -114,9 +118,14 @@ export function TrackRecordPanel({ calls }: { calls: LoggedCall[] }) {
 
   return (
     <div>
-      <h2 className="otto-text-title text-otto-text">Otto's Track Record</h2>
+      <h2 className="otto-text-title text-otto-text">Your Lookups</h2>
       <p className="mt-1 text-sm text-otto-text-muted">
-        Every call logged automatically, unfiltered — {withPrices.length} total.
+        Every stock you've asked Otto about in this browser, checked against real current prices —{" "}
+        {withPrices.length} total. Looking for Otto's full public track record instead?{" "}
+        <a href="/track-record/screener-log" className="font-medium text-otto-gold hover:underline">
+          See the real ledger
+        </a>
+        .
         {winRate !== null && (
           <>
             {" "}

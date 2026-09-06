@@ -1,4 +1,4 @@
-import { redis } from "./cache";
+import { redis, getTrackRecordSummaryCache } from "./cache";
 import { fetchFinnhubQuote } from "./finnhub";
 import { fetchAlpacaHistoricalMonthly } from "./alpaca";
 import { fetchYahooHistoricalMonthly } from "./yahoo";
@@ -600,6 +600,44 @@ export async function getFlagshipSummary(): Promise<FlagshipSummary> {
     avgD90AlphaPct: average(flagship.map((c) => c.evaluations.d90?.alphaPct).filter((v): v is number => v !== undefined)),
     avgD180AlphaPct: average(flagship.map((c) => c.evaluations.d180?.alphaPct).filter((v): v is number => v !== undefined)),
   };
+}
+
+export interface TrackRecordSummary {
+  daysSinceInception: number;
+  totalReturnPct: number;
+  openPositionCount: number;
+  closedPositionCount: number;
+  flagshipCount: number;
+  avgLiveAlphaPct: number | null;
+  avgD30AlphaPct: number | null;
+  avgD90AlphaPct: number | null;
+  avgD180AlphaPct: number | null;
+}
+
+/**
+ * The one real, honest proof object every screener response can attach —
+ * built from getPortfolioSummary + getFlagshipSummary (both already do a
+ * live Finnhub quote per open call), behind a cache so a chat request
+ * never pays for that live-mark pass just to show a headline strip. Never
+ * dresses up a small sample: avgD30AlphaPct stays null, not zero, until a
+ * real 30-day evaluation actually lands — the caller is expected to render
+ * that as "still building the sample," not as "0% alpha."
+ */
+export async function getCachedTrackRecordSummary(): Promise<TrackRecordSummary> {
+  return getTrackRecordSummaryCache<TrackRecordSummary>().getOrSet("summary", async () => {
+    const [portfolio, flagship] = await Promise.all([getPortfolioSummary(), getFlagshipSummary()]);
+    return {
+      daysSinceInception: Math.floor((Date.now() - new Date(portfolio.startedAt).getTime()) / MS_PER_DAY),
+      totalReturnPct: portfolio.totalReturnPct,
+      openPositionCount: portfolio.openPositionCount,
+      closedPositionCount: portfolio.closedPositionCount,
+      flagshipCount: flagship.count,
+      avgLiveAlphaPct: flagship.avgLiveAlphaPct,
+      avgD30AlphaPct: flagship.avgD30AlphaPct,
+      avgD90AlphaPct: flagship.avgD90AlphaPct,
+      avgD180AlphaPct: flagship.avgD180AlphaPct,
+    };
+  });
 }
 
 /**

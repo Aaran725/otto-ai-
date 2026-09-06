@@ -148,6 +148,44 @@ function HeatmapGrid({ screener, onSelect }: { screener: ScreenerResults; onSele
   );
 }
 
+/**
+ * The real proof strip — sourced from getCachedTrackRecordSummary, a live
+ * (20min-cached) read of Otto's actual, permanent screener ledger. Never
+ * dresses up a small sample: while avgD30AlphaPct is still null (no call
+ * has reached a real 30-day evaluation yet), this says so plainly instead
+ * of showing a 0% or hiding the strip entirely — the point is that this
+ * number updates itself the moment real evidence exists, with no further
+ * code change needed here.
+ */
+function TrackRecordStrip({ summary }: { summary: NonNullable<ScreenerResults["trackRecordSummary"]> }) {
+  const hasRealEvaluations = summary.avgD30AlphaPct !== null;
+  return (
+    <a
+      href="/track-record/screener-log"
+      className="otto-material mb-3 flex items-center justify-between gap-2 rounded-xl border border-otto-border-soft px-3 py-2 text-[11px] transition-colors hover:border-otto-text-faint"
+    >
+      <span className="text-otto-text-muted">
+        {hasRealEvaluations ? (
+          <>
+            <span className="font-medium text-otto-text">{summary.flagshipCount}</span> flagship picks ·{" "}
+            <span className={clsx("font-medium", (summary.avgD30AlphaPct ?? 0) >= 0 ? "text-otto-bull" : "text-otto-bear")}>
+              {(summary.avgD30AlphaPct ?? 0) >= 0 ? "+" : ""}
+              {(summary.avgD30AlphaPct ?? 0).toFixed(1)}% avg 30-day alpha vs SPY
+            </span>{" "}
+            — real, unedited
+          </>
+        ) : (
+          <>
+            {summary.daysSinceInception} {summary.daysSinceInception === 1 ? "day" : "days"} into a public, unedited
+            ledger · {summary.flagshipCount} live picks · still building toward the first real 30-day evaluation
+          </>
+        )}
+      </span>
+      <span className="shrink-0 whitespace-nowrap font-medium text-otto-gold">See the ledger →</span>
+    </a>
+  );
+}
+
 export function ScreenerResultsCard({
   screener,
   onSelect,
@@ -157,10 +195,14 @@ export function ScreenerResultsCard({
 }) {
   const VIEWS = ["list", "grid"] as const;
   const [view, setView] = useState<"list" | "grid">("list");
-  const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
+  // The #1 pick is the one a user is actually deciding on right now — its
+  // real evidence (10-K excerpt, insider activity, every scoring nudge)
+  // shouldn't need an extra click to see. Everyone else stays collapsed.
+  const [expandedSymbol, setExpandedSymbol] = useState<string | null>(screener.results[0]?.symbol ?? null);
 
   return (
     <div className="otto-material otto-elevation-resting w-full max-w-md rounded-2xl border p-5">
+      {screener.trackRecordSummary && <TrackRecordStrip summary={screener.trackRecordSummary} />}
       <div className="mb-3 flex items-center justify-between">
         <h3 className="otto-text-label text-otto-text-faint">{screener.intentLabel}</h3>
         <div className="otto-segmented">
