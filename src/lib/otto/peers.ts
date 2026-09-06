@@ -94,17 +94,25 @@ export interface CurrentMetrics {
  * that one anchor metric); every other percentile is best-effort and comes
  * back null when either this stock or too few peers lack that number.
  */
-export async function fetchPeerValuation(symbol: string, current: CurrentMetrics): Promise<PeerValuation | null> {
-  if (current.pe === undefined || current.pe <= 0) return null;
-
-  const target = await fetchSicCode(symbol);
-  if (!target) return null;
-
-  const peerRows = await getPeerCache<PeerRow[]>().getOrSet(`sic-rows:${target.sic}`, async () => {
-    const ciks = await fetchCiksBySic(target.sic);
+/**
+ * The actual expensive part of a peer lookup — resolving a SIC code's real
+ * member companies and fetching each one's fundamentals — factored out so
+ * it can be warmed ahead of time (see warmSicPeerRows) without needing any
+ * particular stock's own current metrics. `excludeSymbol` is only relevant
+ * for a live per-stock lookup (a stock is never its own peer); pass "" to
+ * warm generically. Same 24h SIC-keyed cache either way, so a live request
+ * right after a warm finds it ready instead of racing a cold population
+ * burst against its own scan's Finnhub budget — this was confirmed live to
+ * be unreliable under load: in one real screener scan, only 1 of 5
+ * finalists got a real percentile because the other 4's SIC codes weren't
+ * warm yet and lost the race to the scan's own concurrent Finnhub usage.
+ */
+async function fetchPeerRowsForSic(sic: string, excludeSymbol: string): Promise<PeerRow[]> {
+  return getPeerCache<PeerRow[]>().getOrSet(`sic-rows:${sic}`, async () => {
+    const ciks = await fetchCiksBySic(sic);
     const tickers = await mapWithConcurrency(ciks, RESOLVE_CONCURRENCY, (cik) => fetchTickerForCik(cik));
     const peerSymbols = tickers
-      .filter((t): t is string => t !== null && t.toUpperCase() !== symbol.toUpperCase())
+      .filter((t): t is string => t !== null && t.toUpperCase() !== excludeSymbol.toUpperCase())
       .slice(0, MAX_PEERS);
 
     const rows = await mapWithConcurrency(peerSymbols, FETCH_CONCURRENCY, async (sym): Promise<PeerRow | null> => {
@@ -122,6 +130,24 @@ export async function fetchPeerValuation(symbol: string, current: CurrentMetrics
     });
     return rows.filter((r): r is PeerRow => r !== null);
   });
+}
+
+/** Prewarm-only entry point (see the prewarm cron) — populates the same
+ * peer cache a live fetchPeerValuation call would, ahead of any real
+ * request needing it. Returns the real peer count found, purely for the
+ * cron's own reporting. */
+export async function warmSicPeerRows(sic: string): Promise<number> {
+  const rows = await fetchPeerRowsForSic(sic, "");
+  return rows.length;
+}
+
+export async function fetchPeerValuation(symbol: string, current: CurrentMetrics): Promise<PeerValuation | null> {
+  if (current.pe === undefined || current.pe <= 0) return null;
+
+  const target = await fetchSicCode(symbol);
+  if (!target) return null;
+
+  const peerRows = await fetchPeerRowsForSic(target.sic, symbol);
 
   if (peerRows.length < 3) return null; // too few real peers to mean anything
 

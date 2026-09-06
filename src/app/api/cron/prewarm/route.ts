@@ -5,25 +5,49 @@ import { mapWithConcurrency } from "@/lib/otto/batch";
 import { fetchInsiderClusterFeed } from "@/lib/otto/insider-feed";
 import { detectMaterialFilings } from "@/lib/otto/catalyst-filings";
 import { publishCatalystEvents, type CatalystEvent } from "@/lib/otto/catalyst-bus";
+import { warmSicPeerRows } from "@/lib/otto/peers";
 
 /**
  * Daily cron target (see vercel.json) — quietly refreshes the per-symbol
- * snapshot cache (45min TTL) and the SIC classification cache (24h TTL)
- * for a rotating slice of the real universe, so a live user's screener
- * scan or single-stock lookup is more likely to hit a warm cache instead
- * of paying for a cold Finnhub/SEC fetch. Rotates by day-of-year so a
- * different slice warms each day — full universe coverage over time
+ * snapshot cache (45min TTL), the SIC classification cache (24h TTL), and
+ * (see PEER_SIC_BATCH below) the real sector-peer cache (peers.ts, also
+ * 24h) for a rotating slice of the real universe, so a live user's
+ * screener scan or single-stock lookup is more likely to hit a warm cache
+ * instead of paying for a cold Finnhub/SEC fetch. Rotates by day-of-year
+ * so a different slice warms each day — full universe coverage over time
  * without needing more than one run a day (Vercel Hobby's cron limit).
  *
- * Deliberately modest batch sizes: this shares the same real API budgets
- * (Finnhub's 60/min/key, the SEC EDGAR rate-limit tracker in rate-limit.ts)
- * as live traffic, so pre-warming must never be large enough to itself
- * become the thing that trips a limit real users then pay for.
+ * The peer-warming step exists because of a real, live-observed failure
+ * mode: sector-relative scoring (snowflake.ts) needs a stock's real SIC
+ * peer group, and populating one cold (resolving peers, fetching each
+ * one's fundamentals) is itself a real burst of Finnhub calls — one that
+ * loses the race against a live screener scan's own concurrent Finnhub
+ * usage more often than not. Confirmed live: a real "undervalued" scan
+ * only got a real sector percentile for 1 of 5 finalists, the other 4
+ * falling back to flat thresholds purely because their SIC groups weren't
+ * warm yet. Warming the same SIC codes this cron already resolves today
+ * (real, not arbitrary) means a live scan touching one of them later
+ * usually finds it cached instead of racing to populate it cold.
+ *
+ * Deliberately modest batch sizes throughout: this shares the same real
+ * API budgets (Finnhub's 60/min/key, the SEC EDGAR rate-limit tracker in
+ * rate-limit.ts) as live traffic, so pre-warming must never be large
+ * enough to itself become the thing that trips a limit real users then
+ * pay for.
  */
-export const maxDuration = 60;
+// Bumped from 60s → 90s (Vercel Hobby's max) to make room for real
+// sector-peer warming below — each SIC code populated is itself a real
+// cascade of Finnhub calls (resolve peers, fetch each one's fundamentals),
+// not a single request like the snapshot/SIC-classification work above.
+export const maxDuration = 90;
 
 const SNAPSHOT_BATCH = 150;
 const SIC_BATCH = 60; // subset of the same day's window — SIC only matters for symbols also worth scoring
+// Real sector-peer population is heavier per unit than a snapshot or SIC
+// classification (each one cascades into up to MAX_PEERS more Finnhub
+// calls — see peers.ts), so this stays a small subset of SIC_BATCH's own
+// already-modest 60, not "warm everything classified today."
+const PEER_SIC_BATCH = 15;
 const CONCURRENCY = 10;
 
 function dayOfYear(): number {
@@ -85,10 +109,27 @@ export async function GET(request: Request) {
 
   await publishCatalystEvents([...clusterEvents, ...filingEvents]);
 
+  // Real sector-peer data (peers.ts) feeds Otto's sector-relative scoring
+  // now, but populating a SIC code's peer group from scratch is itself a
+  // real burst of Finnhub calls — confirmed live to be unreliable when it
+  // has to happen mid-scan, racing the same scan's own Finnhub usage (only
+  // 1 of 5 real screener finalists got a percentile in one observed run).
+  // Warming the SIC codes this same cron already resolved above (real,
+  // not arbitrary — the same ones today's snapshot/filing batch actually
+  // covers) means a live scan touching one of them later today most often
+  // finds it already cached instead of racing to populate it cold.
+  const uniqueSics = [...new Set(sicResults.filter((r): r is NonNullable<typeof r> => r !== null).map((r) => r.sic))].slice(
+    0,
+    PEER_SIC_BATCH
+  );
+  const peerWarmResults = await mapWithConcurrency(uniqueSics, CONCURRENCY, (sic) => warmSicPeerRows(sic).catch(() => 0));
+
   return NextResponse.json({
     warmed: {
       snapshots: snapshotResults.filter((r) => r !== null).length,
       sic: sicResults.filter((r) => r !== null).length,
+      peerSics: uniqueSics.length,
+      peerRows: peerWarmResults.reduce((sum, n) => sum + n, 0),
     },
     invalidated: clusterEvents.length + filingEvents.length,
     materialFilings: filingEvents.length,
