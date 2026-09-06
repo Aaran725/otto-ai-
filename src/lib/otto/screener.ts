@@ -20,6 +20,7 @@ import { fetchInsiderActivity, type InsiderActivity } from "./insider";
 import { fetchInsiderClusterFeed, type InsiderClusterEntry } from "./insider-feed";
 import { fetchRiskFactorExcerpt } from "./sec-edgar";
 import { fetchMacroContext } from "./fred";
+import { fetchImpliedFedFundsRate } from "./kalshi";
 import { fetchPeerValuation, type PeerValuation } from "./peers";
 import { fetchEarningsRecord, type EarningsRecord } from "./earnings";
 import { fetchShortInterest, type ShortInterestData } from "./short-interest";
@@ -486,7 +487,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 6; // v6: Phase B — Piotroski accrual/dilution checks + evidence-based asymmetric insider buy/sell weight
+const SCORING_VERSION = 7; // v7: Phase H — real-time Kalshi-implied fed funds rate feeds applyRegimeTilt instead of/alongside FRED's backward-looking reading
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
@@ -761,8 +762,15 @@ export async function runScreener(
     // default 100) — the default window is plenty for a nudge among an
     // already-built pool, but too narrow to reliably supply a whole screen
     // on its own.
-    const [macro, clusterFeed, killedFactors] = await Promise.all([
+    const [macroRaw, impliedFedFundsRate, clusterFeed, killedFactors] = await Promise.all([
       fetchMacroContext().catch(() => null),
+      // Real, live, market-implied fed funds rate from Kalshi's nearest
+      // upcoming FOMC event (kalshi.ts) — forward-looking (what real money
+      // currently expects after the NEXT decision), unlike FRED's
+      // FEDFUNDS series below, which is only as of its last observation.
+      // Same regime-tilt mechanism either way; this just gives it a
+      // sharper input when real market data is available.
+      fetchImpliedFedFundsRate().catch(() => null),
       fetchInsiderClusterFeed(requireInsiderBuying ? 400 : 100).catch(() => [] as InsiderClusterEntry[]),
       // Fail-fast kill switch (see screener-track-record.ts) — a factor
       // that's been net-negative on real, evaluated outcomes for a full
@@ -772,6 +780,8 @@ export async function runScreener(
       // silently disable real signal.
       getKilledFactors().catch(() => new Set<NudgeType>()),
     ]);
+    const macro =
+      macroRaw && impliedFedFundsRate !== null ? { ...macroRaw, fedFundsRate: impliedFedFundsRate } : macroRaw;
     // Union the real insider-buying feed into the candidate pool itself —
     // otherwise a stock with genuine live insider buying could simply never
     // appear in the deterministic universe sample and the "must have
