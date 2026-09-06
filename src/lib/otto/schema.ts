@@ -7,6 +7,7 @@ import type { NewsResult } from "./web-search";
 import type { CatalystEvent } from "./catalyst-bus";
 import type { SegmentAnalysis } from "./segments";
 import type { GovernmentContractSignal } from "./usaspending";
+import type { InstitutionalConvergence } from "./sec-13f";
 
 export type Verdict = "Strong Buy" | "Buy" | "Hold" | "Avoid" | "Strong Avoid";
 
@@ -192,6 +193,15 @@ export interface OttoAnalysis {
    * federal contract history at all — "not applicable," not a bad sign,
    * never fabricated as $0. See usaspending.ts. */
   governmentContracts: GovernmentContractSignal | null;
+  /** Real 13F convergence: how many of a curated list of independent,
+   * well-known institutional managers each increased their own position
+   * in this company per their own most recent real quarterly filing. Not
+   * a "fund X bought it" copy signal — only ever a real, independent
+   * agreement count. Null when zero of the curated managers hold or
+   * increased a position — the common case for most stocks. Always at
+   * least a quarter-plus-45-days old (real 13F filing lag) — see
+   * sec-13f.ts. */
+  institutionalConvergence: InstitutionalConvergence | null;
   generatedAt: string; // ISO timestamp
   dataQuality: DataQuality;
   /** Explains a real screener-vs-conviction divergence when one exists,

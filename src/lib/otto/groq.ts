@@ -21,6 +21,7 @@ import { fetchRecentNews } from "./web-search";
 import { getRecentCatalysts } from "./catalyst-bus";
 import { fetchSegmentAnalysis } from "./segments";
 import { fetchGovernmentContractSignal } from "./usaspending";
+import { fetchInstitutionalConvergence } from "./sec-13f";
 import { computePositionSizing } from "./position-sizing";
 import type { StockBundle } from "./fmp";
 import type { ProgressFn } from "./chat-types";
@@ -358,6 +359,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       recentCatalysts,
       segmentAnalysis,
       governmentContracts,
+      institutionalConvergence,
     ] = await Promise.all([
       computeStreetConsensus(bundle, bundle.symbol)
         .catch(() => null)
@@ -471,6 +473,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       getRecentCatalysts(bundle.symbol),
       fetchSegmentAnalysis(bundle.symbol).catch(() => null),
       fetchGovernmentContractSignal(bundle.quote.name).catch(() => null),
+      fetchInstitutionalConvergence(bundle.quote.name).catch(() => null),
     ]);
 
     const metrics = computeMetrics(bundle, peerValuation, earnings, shortInterest);
@@ -609,6 +612,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       recentCatalysts,
       segmentAnalysis,
       governmentContracts,
+      institutionalConvergence,
       dataQuality,
       historicalPrices: bundle.historicalMonthly.map((p) => ({
         date: p.date,
