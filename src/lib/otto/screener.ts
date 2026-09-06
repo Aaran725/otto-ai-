@@ -470,6 +470,24 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
 // directly answer "is this a well-run, durable business"). "best" stays
 // balanced across all five since it's asking a general question, not
 // screening for one specific factor.
+/**
+ * Bump this any time a change alters what score a given real stock would
+ * get — a new/changed Snowflake check, a nudge weight, an axis weight, a
+ * gate threshold. The screener cache (getOrSetStale, up to 4h fresh + 24h
+ * stale-serve) has no way to know the scoring CODE changed versus just
+ * time passing, so a deploy that changes scoring logic would otherwise
+ * keep serving pre-deploy results for hours — confirmed live: "find
+ * undervalued stocks" showed byte-identical output (old flat-threshold
+ * check labels, not the new sector-relative ones) for hours after the
+ * Phase A sector-relative-scoring deploy, because the cached entry's
+ * `computedAt` predated the deploy and nothing invalidated it. Baking the
+ * version into the cache key means a bump always mints a fresh key —
+ * every intent/theme/cap combination naturally cold-starts under the new
+ * logic on its next request, and old-version entries just age out on
+ * their own TTL instead of needing a manual Redis flush.
+ */
+const SCORING_VERSION = 2; // v2: Phase A — sector-relative peer percentiles
+
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
   momentum: { momentum: 2, growth: 1.5, quality: 0.5, valuation: 0.3, financialHealth: 0.5 },
@@ -729,6 +747,7 @@ export async function runScreener(
     seedTickers.length ? `seed:${seedTickers.map((s) => s.symbol).sort().join(",")}` : null,
     requirements ? `req:${JSON.stringify(requirements)}` : null,
     requireInsiderBuying ? "insider-buying" : null,
+    `v${SCORING_VERSION}`,
   ]
     .filter(Boolean)
     .join(":");
