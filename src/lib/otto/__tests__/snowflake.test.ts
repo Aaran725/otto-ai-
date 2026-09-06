@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { computeSnowflake } from "../snowflake";
 import type { StockBundle } from "../fmp";
+import type { PeerValuation, PeerPercentiles } from "../peers";
 
 /** Minimal valid bundle — every field a real caller could plausibly send
  * with nothing available, so tests only add exactly the fields a given
@@ -85,6 +86,77 @@ describe("computeSnowflake — valuation axis thresholds", () => {
       emptyBundle({ ratios: { symbol: "TEST", fiscalYear: "TTM", priceToEarningsGrowthRatio: -3 } })
     );
     expect(sf.valuation.checks[0]).toEqual({ label: "PEG under 2x", passed: false });
+  });
+});
+
+/** Minimal real-shaped peer fixture — only `percentiles` varies per test,
+ * matching how snowflake.ts actually reads this object (everything else on
+ * PeerValuation is display-only, irrelevant to scoring). */
+function peerFixture(percentiles: Partial<PeerPercentiles>): PeerValuation {
+  const base: PeerPercentiles = { pe: null, pfcf: null, pb: null, ps: null, grossMargin: null, roic: null, roe: null };
+  return {
+    sicDescription: "Test Sector",
+    peerCount: 10,
+    medianPE: 20,
+    percentile: percentiles.pe ?? 50,
+    medianPFCF: null,
+    medianROIC: null,
+    peers: [],
+    percentiles: { ...base, ...percentiles },
+  };
+}
+
+describe("computeSnowflake — sector-relative scoring (real hedge-fund-style percentile ranking)", () => {
+  it("a P/E that fails the flat 25x threshold still passes when it's genuinely cheap vs real sector peers", () => {
+    const bundle = emptyBundle({ ratios: { symbol: "TEST", fiscalYear: "TTM", priceToEarningsRatio: 30 } });
+    // 30x fails the absolute check on its own.
+    const flat = computeSnowflake(bundle);
+    expect(flat.valuation.checks[0]).toEqual({ label: "P/E under 25x", passed: false });
+    // But peer percentile 20 means "better than 80% of real sector peers" —
+    // cheaper than the peer median (<50) should flip the check to pass,
+    // and the label should say so instead of citing the flat 25x rule.
+    const sf = computeSnowflake(bundle, peerFixture({ pe: 20 }));
+    expect(sf.valuation.checks[0].passed).toBe(true);
+    expect(sf.valuation.checks[0].label).toBe("P/E — better than 80% of real sector peers");
+  });
+
+  it("a cheap-looking P/E still fails when it's actually expensive vs real sector peers", () => {
+    const bundle = emptyBundle({ ratios: { symbol: "TEST", fiscalYear: "TTM", priceToEarningsRatio: 10 } });
+    // 10x clears the flat threshold easily on its own.
+    expect(computeSnowflake(bundle).valuation.checks[0].passed).toBe(true);
+    // But a peer percentile of 80 means 80% of real peers are cheaper —
+    // this sector just runs at very low multiples (e.g. banks), so 10x is
+    // actually expensive relative to them.
+    const sf = computeSnowflake(bundle, peerFixture({ pe: 80 }));
+    expect(sf.valuation.checks[0].passed).toBe(false);
+  });
+
+  it("falls back to the absolute threshold for a metric peers didn't cover, even when other metrics have real percentiles", () => {
+    const sf = computeSnowflake(
+      emptyBundle({ ratios: { symbol: "TEST", fiscalYear: "TTM", priceToEarningsRatio: 15, priceToBookRatio: 3 } }),
+      peerFixture({ pe: 30, pb: null }) // pe has a real percentile, pb doesn't (too few peers reported it)
+    );
+    expect(sf.valuation.checks.find((c) => c.label.startsWith("P/E"))?.label).toBe("P/E — better than 70% of real sector peers");
+    // P/B under 6x is the untouched absolute fallback, unaffected by pe's percentile existing.
+    expect(sf.valuation.checks.find((c) => c.label.startsWith("P/B"))).toEqual({ label: "P/B under 6x", passed: true });
+  });
+
+  it("behaves exactly as the no-peer-data path when peerValuation is omitted entirely — no regression", () => {
+    const bundle = emptyBundle({ ratios: { symbol: "TEST", fiscalYear: "TTM", priceToEarningsRatio: 30 } });
+    expect(computeSnowflake(bundle)).toEqual(computeSnowflake(bundle, undefined));
+    expect(computeSnowflake(bundle, null)).toEqual(computeSnowflake(bundle));
+  });
+
+  it("applies the same sector-relative treatment to quality axis metrics (gross margin, ROIC, ROE)", () => {
+    const bundle = emptyBundle({
+      ratios: { symbol: "TEST", fiscalYear: "TTM", grossProfitMargin: 0.2 }, // fails the flat "above 35%" check
+    });
+    expect(computeSnowflake(bundle).quality.checks[0]).toEqual({ label: "Gross margin above 35%", passed: false });
+    // But a real peer percentile of 10 means this stock beats 90% of real
+    // sector peers on gross margin — genuinely excellent for this industry
+    // even though 20% looks weak against a universal 35% bar.
+    const sf = computeSnowflake(bundle, peerFixture({ grossMargin: 10 }));
+    expect(sf.quality.checks[0]).toEqual({ label: "Gross margin — better than 90% of real sector peers", passed: true });
   });
 });
 

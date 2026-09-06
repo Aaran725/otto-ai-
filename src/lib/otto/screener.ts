@@ -20,7 +20,7 @@ import { fetchInsiderActivity, type InsiderActivity } from "./insider";
 import { fetchInsiderClusterFeed, type InsiderClusterEntry } from "./insider-feed";
 import { fetchRiskFactorExcerpt } from "./sec-edgar";
 import { fetchMacroContext } from "./fred";
-import { fetchPeerValuation } from "./peers";
+import { fetchPeerValuation, type PeerValuation } from "./peers";
 import { fetchEarningsRecord, type EarningsRecord } from "./earnings";
 import { fetchShortInterest, type ShortInterestData } from "./short-interest";
 import type { ProgressFn } from "./chat-types";
@@ -903,8 +903,17 @@ export async function runScreener(
       if (earnings) earningsBySymbol.set(candidate.symbol, earnings);
       if (shortInterest) shortInterestBySymbol.set(candidate.symbol, shortInterest);
       const pe = fundamentals?.ratios?.priceToEarningsRatio;
+      let peerValuation: PeerValuation | null = null;
       if (pe !== undefined) {
-        const peerValuation = await fetchPeerValuation(candidate.symbol, pe).catch(() => null);
+        peerValuation = await fetchPeerValuation(candidate.symbol, {
+          pe,
+          pfcf: fundamentals?.ratios?.priceToFreeCashFlowRatio,
+          pb: fundamentals?.ratios?.priceToBookRatio,
+          ps: fundamentals?.ratios?.priceToSalesRatio,
+          grossMargin: fundamentals?.ratios?.grossProfitMargin,
+          roic: fundamentals?.keyMetrics?.returnOnInvestedCapital,
+          roe: fundamentals?.keyMetrics?.returnOnEquity,
+        }).catch(() => null);
         if (peerValuation) sectorPercentileBySymbol.set(candidate.symbol, peerValuation.percentile);
       }
       const analystUpsidePct =
@@ -943,7 +952,7 @@ export async function runScreener(
           income: financialsTrend.income,
           cashFlow: financialsTrend.cashFlow,
         };
-        const sf = computeSnowflake(enrichedBundle);
+        const sf = computeSnowflake(enrichedBundle, peerValuation);
         // Otto's own conservative forecast (same deterministic model used on
         // every single-stock card — forecast.ts) computed here for the
         // first time in the screener path, now that semifinalists have the

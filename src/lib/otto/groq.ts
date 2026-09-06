@@ -318,7 +318,10 @@ export function buildReconciliationNoteFromSnapshot(
 
 async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress?: ProgressFn): Promise<OttoAnalysis> {
     onProgress?.({ id: "snowflake", text: "Computing Snowflake & forecast…", icon: "otto", tracksFinding: true });
-    const snowflakeScores = computeSnowflake(bundle);
+    // Preliminary — no peer data yet, just for the immediate progress
+    // "finding" below. Re-scored with real sector-peer percentiles once
+    // fetchPeerValuation resolves in the Promise.all further down.
+    let snowflakeScores = computeSnowflake(bundle);
     const forecastTargets = computeForecastTargets(bundle);
     onProgress?.({
       id: "snowflake",
@@ -390,7 +393,15 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
           });
           return r;
         }),
-      fetchPeerValuation(bundle.symbol, bundle.ratios?.priceToEarningsRatio)
+      fetchPeerValuation(bundle.symbol, {
+        pe: bundle.ratios?.priceToEarningsRatio,
+        pfcf: bundle.ratios?.priceToFreeCashFlowRatio,
+        pb: bundle.ratios?.priceToBookRatio,
+        ps: bundle.ratios?.priceToSalesRatio,
+        grossMargin: bundle.ratios?.grossProfitMargin,
+        roic: bundle.keyMetrics?.returnOnInvestedCapital,
+        roe: bundle.keyMetrics?.returnOnEquity,
+      })
         .catch(() => null)
         .then((r) => {
           onProgress?.({
@@ -461,6 +472,18 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
 
     const metrics = computeMetrics(bundle, peerValuation, earnings, shortInterest);
     const rateSensitivity = computeRateSensitivity(bundle.keyMetrics?.freeCashFlowYield, macro?.treasury10Y);
+
+    // Re-scored now that real sector-peer data has actually landed — the
+    // line-321 computeSnowflake ran before this Promise.all resolved and
+    // never had it. Real peer percentiles (peers.ts) replace several of
+    // computeSnowflake's flat absolute thresholds (P/E under 25x is cheap
+    // for a bank and expensive for software) with "cheaper/better than the
+    // real sector peer set," which is what an actual multi-factor model
+    // does — the flat thresholds stay as the fallback when peer data is too
+    // thin (see snowflake.ts). The reconciliation note earlier in this file
+    // deliberately still uses the pre-peer quick score — that's the
+    // documented "thinner scan" it's comparing against.
+    snowflakeScores = computeSnowflake(bundle, peerValuation);
 
     const computedSignals = {
       snowflake: summarizeSnowflakeForPrompt(snowflakeScores),

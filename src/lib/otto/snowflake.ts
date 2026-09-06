@@ -1,5 +1,6 @@
 import type { StockBundle } from "./fmp";
 import { computeTechnicals } from "./technicals";
+import type { PeerValuation } from "./peers";
 
 export interface SnowflakeCheck {
   label: string;
@@ -41,31 +42,68 @@ function yoyGrowth(latest: number, prior: number): number | null {
 }
 
 /**
+ * Real quant multi-factor models rank a stock against its actual sector
+ * peers, never against one flat number for the whole market — 25x P/E is
+ * expensive for a bank and cheap for a high-margin software company. When
+ * a real peer percentile exists for this metric (peers.ts's
+ * fetchPeerValuation — "% of real sector peers better than this stock,"
+ * so under 50 means better than the peer median), it replaces the flat
+ * threshold check entirely. Falls back to the absolute threshold when
+ * there's no percentile (thin/unclassified SIC code, or this specific
+ * metric wasn't available across enough peers) — never silently drops the
+ * check, since a stock with no peer data shouldn't score worse just for
+ * that.
+ */
+function sectorOrAbsolute(percentile: number | null | undefined, sectorLabel: string, fallback: SnowflakeCheck | null): SnowflakeCheck | null {
+  if (percentile !== null && percentile !== undefined) {
+    return { label: `${sectorLabel} — better than ${100 - percentile}% of real sector peers`, passed: percentile < 50 };
+  }
+  return fallback;
+}
+
+/**
  * All five axes are scored from fixed absolute thresholds against real FMP
  * data — no LLM involved. This mirrors Simply Wall St's pass/fail-check
  * methodology: reproducible, explainable, can't hallucinate a number. Every
  * check below is only added to its axis when the underlying field actually
- * exists — see the `axis()` doc comment for why that matters.
+ * exists — see the `axis()` doc comment for why that matters. `peerValuation`
+ * is optional and, when present, upgrades several checks from an absolute
+ * threshold to a real sector-relative percentile — see `sectorOrAbsolute`.
  */
-export function computeSnowflake(bundle: StockBundle): OttoSnowflakeScores {
+export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuation | null): OttoSnowflakeScores {
   const { quote, ratios, keyMetrics, income, cashFlow } = bundle;
+  const pct = peerValuation?.percentiles;
 
   const valuationChecks: SnowflakeCheck[] = [];
-  if (ratios?.priceToEarningsRatio !== undefined) {
-    valuationChecks.push({ label: "P/E under 25x", passed: ratios.priceToEarningsRatio < 25 });
-  }
-  if (ratios?.priceToFreeCashFlowRatio !== undefined) {
-    valuationChecks.push({ label: "P/FCF under 20x", passed: ratios.priceToFreeCashFlowRatio < 20 });
-  }
+  const peCheck = sectorOrAbsolute(
+    pct?.pe,
+    "P/E",
+    ratios?.priceToEarningsRatio !== undefined ? { label: "P/E under 25x", passed: ratios.priceToEarningsRatio < 25 } : null
+  );
+  if (peCheck) valuationChecks.push(peCheck);
+  const pfcfCheck = sectorOrAbsolute(
+    pct?.pfcf,
+    "P/FCF",
+    ratios?.priceToFreeCashFlowRatio !== undefined
+      ? { label: "P/FCF under 20x", passed: ratios.priceToFreeCashFlowRatio < 20 }
+      : null
+  );
+  if (pfcfCheck) valuationChecks.push(pfcfCheck);
   if (keyMetrics?.freeCashFlowYield !== undefined) {
     valuationChecks.push({ label: "FCF yield above 4%", passed: keyMetrics.freeCashFlowYield > 0.04 });
   }
-  if (ratios?.priceToBookRatio !== undefined) {
-    valuationChecks.push({ label: "P/B under 6x", passed: ratios.priceToBookRatio < 6 });
-  }
-  if (ratios?.priceToSalesRatio !== undefined) {
-    valuationChecks.push({ label: "P/S under 6x", passed: ratios.priceToSalesRatio < 6 });
-  }
+  const pbCheck = sectorOrAbsolute(
+    pct?.pb,
+    "P/B",
+    ratios?.priceToBookRatio !== undefined ? { label: "P/B under 6x", passed: ratios.priceToBookRatio < 6 } : null
+  );
+  if (pbCheck) valuationChecks.push(pbCheck);
+  const psCheck = sectorOrAbsolute(
+    pct?.ps,
+    "P/S",
+    ratios?.priceToSalesRatio !== undefined ? { label: "P/S under 6x", passed: ratios.priceToSalesRatio < 6 } : null
+  );
+  if (psCheck) valuationChecks.push(psCheck);
   if (ratios?.priceToEarningsGrowthRatio !== undefined) {
     const peg = ratios.priceToEarningsGrowthRatio;
     valuationChecks.push({ label: "PEG under 2x", passed: peg > 0 && peg < 2 });
@@ -107,25 +145,42 @@ export function computeSnowflake(bundle: StockBundle): OttoSnowflakeScores {
   const growth = axis(growthChecks);
 
   const qualityChecks: SnowflakeCheck[] = [];
-  if (ratios?.grossProfitMargin !== undefined) {
-    qualityChecks.push({ label: "Gross margin above 35%", passed: ratios.grossProfitMargin > 0.35 });
-  }
+  const grossMarginCheck = sectorOrAbsolute(
+    pct?.grossMargin,
+    "Gross margin",
+    ratios?.grossProfitMargin !== undefined ? { label: "Gross margin above 35%", passed: ratios.grossProfitMargin > 0.35 } : null
+  );
+  if (grossMarginCheck) qualityChecks.push(grossMarginCheck);
   if (ratios?.operatingProfitMargin !== undefined) {
     qualityChecks.push({ label: "Operating margin above 10%", passed: ratios.operatingProfitMargin > 0.1 });
   }
   if (ratios?.netProfitMargin !== undefined) {
     qualityChecks.push({ label: "Net margin above 5%", passed: ratios.netProfitMargin > 0.05 });
   }
+  const roicCheck = sectorOrAbsolute(
+    pct?.roic,
+    "ROIC",
+    keyMetrics?.returnOnInvestedCapital !== undefined
+      ? { label: "ROIC above 10%", passed: keyMetrics.returnOnInvestedCapital > 0.1 }
+      : null
+  );
+  if (roicCheck) qualityChecks.push(roicCheck);
   if (keyMetrics?.returnOnInvestedCapital !== undefined) {
-    qualityChecks.push({ label: "ROIC above 10%", passed: keyMetrics.returnOnInvestedCapital > 0.1 });
+    // Real WACC-derived hurdle, not a "what's normal for this sector"
+    // question — capital-intensive and asset-light sectors both owe the
+    // same real cost of capital, so this stays absolute even when a peer
+    // percentile exists for the check above.
     qualityChecks.push({
       label: "ROIC beats a ~8% cost of capital",
       passed: keyMetrics.returnOnInvestedCapital > 0.08,
     });
   }
-  if (keyMetrics?.returnOnEquity !== undefined) {
-    qualityChecks.push({ label: "ROE above 15%", passed: keyMetrics.returnOnEquity > 0.15 });
-  }
+  const roeCheck = sectorOrAbsolute(
+    pct?.roe,
+    "ROE",
+    keyMetrics?.returnOnEquity !== undefined ? { label: "ROE above 15%", passed: keyMetrics.returnOnEquity > 0.15 } : null
+  );
+  if (roeCheck) qualityChecks.push(roeCheck);
   const quality = axis(qualityChecks);
 
   const financialHealthChecks: SnowflakeCheck[] = [];
