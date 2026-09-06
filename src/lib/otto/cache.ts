@@ -216,6 +216,7 @@ const globalForCache = globalThis as unknown as {
   __ottoShortInterestCache?: TtlCache<unknown>;
   __ottoSymbolScoreCache?: TtlCache<unknown>;
   __ottoFinnhubFundamentalsCache?: TtlCache<unknown>;
+  __ottoFinnhubFinancialsTrendCache?: TtlCache<unknown>;
   __ottoDailyPriceCache?: TtlCache<unknown>;
   __ottoNewsCache?: TtlCache<unknown>;
   __ottoSegmentCache?: TtlCache<unknown>;
@@ -314,6 +315,23 @@ export function getFinnhubFundamentalsCache<T>(): TtlCache<T> {
   // landing on the same warm instance).
   globalForCache.__ottoFinnhubFundamentalsCache ??= new TtlCache("finnhub-fundamentals", 30 * 60 * 1000); // 30 min
   return globalForCache.__ottoFinnhubFundamentalsCache as TtlCache<T>;
+}
+
+export function getFinnhubFinancialsTrendCache<T>(): TtlCache<T> {
+  // Same real bug class as getFinnhubFundamentalsCache above, confirmed
+  // live a second time: fetchFinnhubFinancialsTrend (5-year income/cash-flow
+  // trend, /stock/financials-reported) had NO cache at all, so every single
+  // screener candidate re-fetched it fresh on every scan — no fallback to a
+  // prior success when a heavy scan's concurrent Finnhub load caused this
+  // one call to fail. Confirmed live: UMBF's single-stock lookup got real
+  // sector-relative scoring while the screener's own enrichment for the
+  // same symbol, moments later, silently fell back to flat thresholds —
+  // this was the actual gate (financialsTrend must succeed for the
+  // enrichment branch, including the peer lookup, to run at all), not a
+  // problem with the peer data itself. 24h is honest, not lazy: an annual
+  // 5-year trend only changes a few times a year.
+  globalForCache.__ottoFinnhubFinancialsTrendCache ??= new TtlCache("finnhub-financials-trend", 24 * 60 * 60 * 1000); // 24 h
+  return globalForCache.__ottoFinnhubFinancialsTrendCache as TtlCache<T>;
 }
 
 export function getDailyPriceCache<T>(): TtlCache<T> {

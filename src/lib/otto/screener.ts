@@ -486,7 +486,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 3; // v3: Phase A3 — sibling-SIC-family widening when the exact code is too thin
+const SCORING_VERSION = 4; // v4: cached fetchFinnhubFinancialsTrend — enrichment branch (peer lookup + sector-relative rescoring) no longer silently skipped under concurrent load
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },

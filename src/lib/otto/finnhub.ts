@@ -1,5 +1,5 @@
 import type { FmpRatios, FmpKeyMetrics, FmpIncomeStatement, FmpCashFlowStatement } from "./fmp";
-import { getFinnhubFundamentalsCache } from "./cache";
+import { getFinnhubFundamentalsCache, getFinnhubFinancialsTrendCache } from "./cache";
 import { recordEvent } from "./observability";
 
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
@@ -346,9 +346,28 @@ function findConcept(items: FinnhubReportConcept[] | undefined, candidates: stri
  * concept names in priority order. A year is skipped (not zero-filled) if
  * revenue/net income can't be found, rather than showing a fabricated 0.
  */
-export async function fetchFinnhubFinancialsTrend(
-  symbol: string
-): Promise<{ income: FmpIncomeStatement[]; cashFlow: FmpCashFlowStatement[] } | null> {
+type FinancialsTrend = { income: FmpIncomeStatement[]; cashFlow: FmpCashFlowStatement[] };
+
+/**
+ * Cached at the source, same pattern and same reason as
+ * fetchFinnhubFundamentals (see getFinnhubFinancialsTrendCache): this had
+ * no cache at all until confirmed live to be the actual gate on Phase A's
+ * sector-relative scoring silently not applying in the screener path — the
+ * enrichment branch (screener.ts) only runs, and only then attempts a peer
+ * lookup, when this call succeeds, and a heavy scan's concurrent Finnhub
+ * load could make this one uncached, unretried call fail while a
+ * moments-later single-stock lookup for the same symbol succeeded fine.
+ */
+export async function fetchFinnhubFinancialsTrend(symbol: string): Promise<FinancialsTrend | null> {
+  const cache = getFinnhubFinancialsTrendCache<FinancialsTrend>();
+  const cached = await cache.get(symbol.toUpperCase());
+  if (cached) return cached;
+  const result = await fetchFinnhubFinancialsTrendUncached(symbol);
+  if (result) await cache.set(symbol.toUpperCase(), result);
+  return result;
+}
+
+async function fetchFinnhubFinancialsTrendUncached(symbol: string): Promise<FinancialsTrend | null> {
   const data = await finnhubGet<FinnhubReportedFinancialsResponse>(
     `/stock/financials-reported?symbol=${encodeURIComponent(symbol)}&freq=annual`
   );
