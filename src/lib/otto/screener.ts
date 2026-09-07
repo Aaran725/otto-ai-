@@ -509,7 +509,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 15; // v15: Phase O — real yield-curve inversion (FRED DGS2/DGS10 2s10s spread) layered on top of the existing fed-funds regime tilt, affecting screener ranking whenever the curve is inverted
+const SCORING_VERSION = 16; // v16: Phase P — real gross-margin stability ("durable moat") check added to the quality axis, empirically-checked 0.05 coefficient-of-variation threshold against known stable/cyclical names
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },

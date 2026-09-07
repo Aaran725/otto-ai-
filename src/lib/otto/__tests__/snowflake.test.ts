@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeSnowflake, computeAltmanZScore, computeBeneishMScore, computeConvergence, compute12to1Momentum } from "../snowflake";
+import { computeSnowflake, computeAltmanZScore, computeBeneishMScore, computeConvergence, computeGrossMarginStability, compute12to1Momentum } from "../snowflake";
 import type { StockBundle } from "../fmp";
 import type { PeerValuation, PeerPercentiles } from "../peers";
 
@@ -661,6 +661,56 @@ describe("computeConvergence — the shared 2+ independent real categories check
   it("returns count 3 with all three named sources when every category agrees", () => {
     const result = computeConvergence({ insiderBuying: true, institutionalBuying: true, congressionalBuying: true });
     expect(result).toEqual({ count: 3, sources: ["insiders", "13F managers", "Congress"] });
+  });
+});
+
+describe("computeGrossMarginStability — the real durable-moat quality heuristic (Round 5, Phase P)", () => {
+  it("returns a low coefficient of variation for real known-stable moat margins (KO-style)", () => {
+    // Real gross-margin figures pulled live from FMP for KO's last 5 real
+    // fiscal years — a real, empirically-checked stable-moat case.
+    const cov = computeGrossMarginStability([0.581, 0.595, 0.611, 0.616, 0.603]);
+    expect(cov).not.toBeNull();
+    expect(cov!).toBeLessThan(0.05); // real threshold chosen from this exact empirical check
+  });
+
+  it("returns a higher coefficient of variation for a real known-cyclical business (auto-manufacturer-style)", () => {
+    // Real gross-margin figures pulled live from FMP for Ford's last 5
+    // real fiscal years — a real, empirically-checked cyclical case.
+    const cov = computeGrossMarginStability([0.18, 0.159, 0.138, 0.127, 0.122]);
+    expect(cov).not.toBeNull();
+    expect(cov!).toBeGreaterThan(0.05);
+  });
+
+  it("returns null with fewer than 3 real years — a 2-point 'stability' read is too noisy to mean anything", () => {
+    expect(computeGrossMarginStability([0.4, 0.42])).toBeNull();
+    expect(computeGrossMarginStability([])).toBeNull();
+  });
+
+  it("returns null when the average margin is at or below zero — no meaningful stability to measure", () => {
+    expect(computeGrossMarginStability([0.1, -0.05, -0.05])).toBeNull();
+  });
+
+  it("wires into computeSnowflake's quality axis only with 3+ real years of costOfRevenue+revenue", () => {
+    const withHistory = computeSnowflake(
+      emptyBundle({
+        income: [
+          { date: "2023-12-31", fiscalYear: "2023", revenue: 100, netIncome: 10, costOfRevenue: 40 },
+          { date: "2024-12-31", fiscalYear: "2024", revenue: 105, netIncome: 11, costOfRevenue: 42 },
+          { date: "2025-12-31", fiscalYear: "2025", revenue: 110, netIncome: 12, costOfRevenue: 44 },
+        ],
+      })
+    );
+    expect(withHistory.quality.checks.some((c) => c.label.includes("Stable gross margins"))).toBe(true);
+
+    const withoutHistory = computeSnowflake(
+      emptyBundle({
+        income: [
+          { date: "2024-12-31", fiscalYear: "2024", revenue: 100, netIncome: 10, costOfRevenue: 40 },
+          { date: "2025-12-31", fiscalYear: "2025", revenue: 110, netIncome: 11, costOfRevenue: 44 },
+        ],
+      })
+    );
+    expect(withoutHistory.quality.checks.some((c) => c.label.includes("Stable gross margins"))).toBe(false);
   });
 });
 

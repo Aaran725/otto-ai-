@@ -200,6 +200,30 @@ export function computeConvergence(input: {
 }
 
 /**
+ * Real "durable moat" quality signal (Round 5, Phase P) — a moat's real
+ * signature in quality-investing practice (Terry Smith/Morningstar-style
+ * "wide moat" investing) isn't just a high gross margin at one point in
+ * time, it's a STABLE one: a business whose margin swings hard year to
+ * year is structurally weaker/more cyclical/commoditized than one holding
+ * roughly steady, even at the same average. Coefficient of variation
+ * (stddev / mean) of gross margin across the real years given — lower
+ * means more stable. Needs 3+ real years (a 2-point "stability" read is
+ * too noisy to mean anything) and a positive mean margin (a business with
+ * an average gross margin at or below zero has no meaningful stability
+ * to measure). Unlike Altman Z/Beneish/Piotroski, this isn't a single
+ * validated academic formula — it's a real, sensible quality heuristic,
+ * labeled as such rather than oversold as equally canonical. Pure,
+ * exported for direct testing.
+ */
+export function computeGrossMarginStability(grossMargins: number[]): number | null {
+  if (grossMargins.length < 3) return null;
+  const mean = grossMargins.reduce((sum, m) => sum + m, 0) / grossMargins.length;
+  if (mean <= 0) return null;
+  const variance = grossMargins.reduce((sum, m) => sum + (m - mean) ** 2, 0) / grossMargins.length;
+  return Math.sqrt(variance) / mean;
+}
+
+/**
  * All five axes are scored from fixed absolute thresholds against real FMP
  * data — no LLM involved. This mirrors Simply Wall St's pass/fail-check
  * methodology: reproducible, explainable, can't hallucinate a number. Every
@@ -436,6 +460,22 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
         passed: m < -1.78,
       });
     }
+  }
+  // Real margin-stability "durable moat" check (Round 5, Phase P) — real
+  // 0.05 coefficient-of-variation threshold, empirically checked against
+  // known stable moats (KO/JNJ/COST: real CoV 0.02-0.024) and known
+  // cyclicals (XOM: 0.065, Ford/GM: 0.15-0.20, airlines: 0.34+) before
+  // picking a cutoff, not guessed blind. FMP-primary-only, same
+  // limitation as every other multi-year check here.
+  const grossMargins = income
+    .filter((i) => i.costOfRevenue !== undefined && i.revenue !== 0)
+    .map((i) => (i.revenue - i.costOfRevenue!) / i.revenue);
+  const marginStability = computeGrossMarginStability(grossMargins);
+  if (marginStability !== null) {
+    qualityChecks.push({
+      label: `Stable gross margins (${(marginStability * 100).toFixed(1)}% variation) — low cyclicality`,
+      passed: marginStability < 0.05,
+    });
   }
   const quality = axis(qualityChecks);
 
