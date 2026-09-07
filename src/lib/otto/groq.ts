@@ -4,7 +4,7 @@ import type { GroqOttoResponse, OttoAnalysis, OttoSnowflake, StreetConsensus, Da
 import { getCachedScreenerSnapshot, type ScreenIntent } from "./screener";
 import { recordEvent } from "./observability";
 import { getAnalysisCache } from "./cache";
-import { computeSnowflake, type OttoSnowflakeScores } from "./snowflake";
+import { computeSnowflake, computeConvergence, type OttoSnowflakeScores } from "./snowflake";
 import { computeForecastTargets } from "./forecast";
 import { computeMetrics } from "./metrics";
 import { summarizeBundleForPrompt } from "./summarize-bundle";
@@ -480,6 +480,20 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
     ]);
 
     const metrics = computeMetrics(bundle, peerValuation, earnings, shortInterest);
+    // Real convergence (Phase I originally, extended here in Phase K): the
+    // exact same "2+ independent real categories buying" check the
+    // screener already scores with a real point nudge — until now this
+    // path fetched institutionalConvergence/congressionalConvergence (see
+    // the Promise.all above) but only ever surfaced them in the final
+    // returned object for display, never fed them to Groq, so a single-
+    // stock lookup got zero conviction benefit from real institutional or
+    // congressional buying that the exact same stock would have been
+    // rewarded for in the screener. Shared, pure logic — see snowflake.ts.
+    const convergence = computeConvergence({
+      insiderBuying: insiderActivity?.direction === "buying",
+      institutionalBuying: !!institutionalConvergence,
+      congressionalBuying: !!congressionalConvergence,
+    });
     const rateSensitivity = computeRateSensitivity(bundle.keyMetrics?.freeCashFlowYield, macro?.treasury10Y);
 
     // Re-scored now that real sector-peer data has actually landed — the
@@ -508,6 +522,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       ...(insiderActivity
         ? { insiderActivity: { direction: insiderActivity.direction, buys: insiderActivity.buys, sells: insiderActivity.sells } }
         : {}),
+      ...(convergence ? { convergence: { sources: convergence.sources } } : {}),
       // Real, structured events (SEC item codes, the insider-cluster feed)
       // — unlike recentNews, this is verified primary-source data, so it's
       // fair game for the LLM to actually ground a catalyst/risk in.

@@ -169,6 +169,36 @@ export function computeBeneishMScore(
   return Number.isFinite(m) ? m : null;
 }
 
+export interface ConvergenceResult {
+  count: number; // how many independent real categories agree (2 or 3)
+  sources: string[]; // e.g. ["insiders", "13F managers", "Congress"]
+}
+
+/**
+ * The "Real Convergence Score" structural idea from Round 3: a CEO buying
+ * with their own money, a representative disclosing a purchase, and
+ * unrelated hedge funds all increasing the same position in the same
+ * window is categorically stronger evidence than any one of those alone.
+ * Pure, exported, and shared — this is the single real "2+ independent
+ * categories agree" check, used both by the screener's per-candidate
+ * nudge (screener.ts) and the single-stock conviction score (groq.ts).
+ * Never fabricates agreement from one category counted twice: returns
+ * null below 2 real sources.
+ */
+export function computeConvergence(input: {
+  insiderBuying: boolean;
+  institutionalBuying: boolean;
+  congressionalBuying: boolean;
+}): ConvergenceResult | null {
+  const sources = [
+    input.insiderBuying ? "insiders" : null,
+    input.institutionalBuying ? "13F managers" : null,
+    input.congressionalBuying ? "Congress" : null,
+  ].filter((s): s is string => s !== null);
+  if (sources.length < 2) return null;
+  return { count: sources.length, sources };
+}
+
 /**
  * All five axes are scored from fixed absolute thresholds against real FMP
  * data — no LLM involved. This mirrors Simply Wall St's pass/fail-check
@@ -406,9 +436,13 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
   if (keyMetrics?.netDebtToEBITDA !== undefined) {
     financialHealthChecks.push({ label: "Net debt under 3x EBITDA", passed: keyMetrics.netDebtToEBITDA < 3 });
   }
-  // Real Altman Z-Score — currently FMP-primary-path only, since
-  // balanceSheet is only populated there (see StockBundle's own comment);
-  // the screener's Finnhub-sourced enrichment doesn't get this check yet.
+  // Real Altman Z-Score — fires on both real data paths: FMP's own
+  // /balance-sheet-statement, and (Phase K) the Finnhub-sourced fallback
+  // used when FMP blocks that endpoint for a ticker (see fmp.ts and
+  // finnhub.ts's fetchFinnhubFinancialsTrend) — confirmed live on CRWD via
+  // the latter path. Never fires for a filer missing any required field
+  // (e.g. banks structurally don't report AssetsCurrent/LiabilitiesCurrent
+  // — see finnhub.ts's real, documented gap), rather than guessing.
   if (latestBalanceSheet && latestIncome?.ebit !== undefined && quote.marketCap > 0) {
     const z = computeAltmanZScore({
       totalAssets: latestBalanceSheet.totalAssets,

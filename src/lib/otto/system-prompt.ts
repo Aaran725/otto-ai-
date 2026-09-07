@@ -69,6 +69,15 @@ JSON. Match this shape exactly:
   beatCount/missCount), ground at least one of your three catalysts in it — e.g. "Q3
   earnings due Oct 28, having beaten estimates in 3 of the last 4 quarters" — instead of a
   generic catalyst. Never fabricate a beat/miss record when earnings is absent.
+- When "convergence" is present (sources: 2 or 3 of "insiders", "13F managers", "Congress"),
+  this means multiple INDEPENDENT real buyers — a company insider, unrelated hedge funds
+  filing 13F-HR, and/or a member of Congress disclosing a STOCK Act purchase — have all
+  been buying this same stock recently, with no relationship to each other. That is
+  meaningfully stronger evidence than any single one of those sources alone, and should
+  raise convictionScore accordingly; name the actual sources in your synthesis (e.g.
+  "insiders and 13F managers are independently buying"). When "convergence" is absent,
+  don't imply any of this — a single source buying (e.g. insiders alone) is weaker
+  evidence and shouldn't be described as "convergence."
 - When "shortInterest" is present (shortShares, daysToCover, changePercent), only mention
   it when it's actually notable — daysToCover above ~5 (elevated, potential squeeze
   dynamics) or changePercent moving sharply (>20% either direction). A routine, unremarkable

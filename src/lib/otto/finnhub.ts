@@ -1,4 +1,4 @@
-import type { FmpRatios, FmpKeyMetrics, FmpIncomeStatement, FmpCashFlowStatement } from "./fmp";
+import type { FmpRatios, FmpKeyMetrics, FmpIncomeStatement, FmpCashFlowStatement, FmpBalanceSheetStatement } from "./fmp";
 import { getFinnhubFundamentalsCache, getFinnhubFinancialsTrendCache } from "./cache";
 import { recordEvent } from "./observability";
 
@@ -321,6 +321,7 @@ interface FinnhubReportedFinancialsEntry {
   report: {
     ic?: FinnhubReportConcept[];
     cf?: FinnhubReportConcept[];
+    bs?: FinnhubReportConcept[];
   };
 }
 
@@ -375,7 +376,7 @@ export function findRevenueConcept(ic: FinnhubReportConcept[] | undefined): numb
  * concept names in priority order. A year is skipped (not zero-filled) if
  * revenue/net income can't be found, rather than showing a fabricated 0.
  */
-type FinancialsTrend = { income: FmpIncomeStatement[]; cashFlow: FmpCashFlowStatement[] };
+type FinancialsTrend = { income: FmpIncomeStatement[]; cashFlow: FmpCashFlowStatement[]; balanceSheet: FmpBalanceSheetStatement[] };
 
 /**
  * Cached at the source, same pattern and same reason as
@@ -413,10 +414,11 @@ async function fetchFinnhubFinancialsTrendUncached(symbol: string): Promise<Fina
 
   const income: FmpIncomeStatement[] = [];
   const cashFlow: FmpCashFlowStatement[] = [];
+  const balanceSheet: FmpBalanceSheetStatement[] = [];
 
   for (const year of years) {
     const entry = byYear.get(year)!;
-    const { ic, cf } = entry.report;
+    const { ic, cf, bs } = entry.report;
 
     const revenue = findRevenueConcept(ic);
     const netIncome = findConcept(ic, ["us-gaap_NetIncomeLoss", "us-gaap_ProfitLoss"]);
@@ -431,8 +433,11 @@ async function fetchFinnhubFinancialsTrendUncached(symbol: string): Promise<Fina
       "us-gaap_WeightedAverageNumberOfDilutedSharesOutstanding",
       "us-gaap_WeightedAverageNumberOfSharesOutstandingBasic",
     ]);
+    // Real EBIT proxy — powers the Altman Z-Score check (snowflake.ts) on
+    // this Finnhub-sourced path, same as FMP's own `ebit` field.
+    const ebit = findConcept(ic, ["us-gaap_OperatingIncomeLoss"]);
 
-    income.push({ date: entry.endDate, fiscalYear: String(year), revenue, netIncome, sharesOutstanding });
+    income.push({ date: entry.endDate, fiscalYear: String(year), revenue, netIncome, sharesOutstanding, ebit });
     cashFlow.push({
       date: entry.endDate,
       fiscalYear: String(year),
@@ -443,7 +448,38 @@ async function fetchFinnhubFinancialsTrendUncached(symbol: string): Promise<Fina
       operatingCashFlow,
       capex: operatingCashFlow !== undefined ? capex : undefined, // only meaningful alongside a real operatingCashFlow
     });
+
+    // Real Altman Z inputs (Phase K) — confirmed live: non-financial filers
+    // (AAPL) report all 5 of these under standard tags; banks (UMBF, and
+    // financial institutions generally) never report AssetsCurrent /
+    // LiabilitiesCurrent at all, since a bank's balance sheet isn't
+    // classified into current/noncurrent in the first place — a real,
+    // structural gap, not a missing-data bug, and consistent with Altman Z
+    // itself being designed for non-financial firms. Skip the year (never
+    // zero-fill) when any of the 5 aren't reported under a recognized tag.
+    const totalAssets = findConcept(bs, ["us-gaap_Assets"]);
+    const totalCurrentAssets = findConcept(bs, ["us-gaap_AssetsCurrent"]);
+    const totalCurrentLiabilities = findConcept(bs, ["us-gaap_LiabilitiesCurrent"]);
+    const totalLiabilities = findConcept(bs, ["us-gaap_Liabilities"]);
+    const retainedEarnings = findConcept(bs, ["us-gaap_RetainedEarningsAccumulatedDeficit"]);
+    if (
+      totalAssets !== undefined &&
+      totalCurrentAssets !== undefined &&
+      totalCurrentLiabilities !== undefined &&
+      totalLiabilities !== undefined &&
+      retainedEarnings !== undefined
+    ) {
+      balanceSheet.push({
+        date: entry.endDate,
+        fiscalYear: String(year),
+        totalAssets,
+        totalCurrentAssets,
+        totalCurrentLiabilities,
+        totalLiabilities,
+        retainedEarnings,
+      });
+    }
   }
 
-  return income.length > 0 ? { income, cashFlow } : null;
+  return income.length > 0 ? { income, cashFlow, balanceSheet } : null;
 }

@@ -8,7 +8,7 @@ import {
   fetchFinnhubFinancialsTrend,
 } from "./finnhub";
 import { fetchSecUniverse, fetchCikForSymbol, type UniverseEntry } from "./sec-universe";
-import { computeSnowflake, type OttoSnowflakeScores } from "./snowflake";
+import { computeSnowflake, computeConvergence, type OttoSnowflakeScores } from "./snowflake";
 import { getScreenerCache, getSymbolScoreCache, getDailyPriceCache } from "./cache";
 import { mapWithConcurrency } from "./batch";
 import { fetchAlpacaHistoricalDaily, fetchAlpacaHistoricalMonthly, type DailyPricePoint } from "./alpaca";
@@ -443,7 +443,7 @@ export async function buildFinnhubBundle(symbol: string): Promise<StockBundle | 
     historicalMonthly: [],
     income: [],
     cashFlow: [],
-    balanceSheet: [], // Finnhub's financials-reported has no clean balance-sheet equivalent yet — Altman Z stays FMP-only for now
+    balanceSheet: [], // this quick quote+metric snapshot never fetches financials-reported either (see fetchFinnhubFinancialsTrend, used by the fuller semifinalist enrichment below) — no income/cashFlow here either, so there's no Altman Z input regardless
   };
 }
 
@@ -508,7 +508,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 12; // v12: Phase J real Beneish M-Score (quality axis) + fixed a latent balanceSheet ordering bug (never reversed like income/cashFlow, only harmless at limit:1 — now widened to 5 years for real YoY sub-indices)
+const SCORING_VERSION = 13; // v13: Phase K — convergence (13F/Congress) now reaches single-stock convictionScore via computedSignals, shared computeConvergence logic; screener's Finnhub-sourced semifinalist bundle now gets real balance-sheet data (Altman Z can fire there too) and a real market cap instead of a hardcoded 0
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
@@ -933,6 +933,7 @@ export async function runScreener(
         monthlyHistory,
         institutionalConvergence,
         congressionalConvergence,
+        profile2,
       ] = await Promise.all([
         fetchInsiderActivity(candidate.symbol).catch(() => null),
         fetchFinnhubRatingTrend(candidate.symbol).catch(() => null),
@@ -969,6 +970,12 @@ export async function runScreener(
           .catch(() => []),
         fetchInstitutionalConvergence(candidate.companyName).catch(() => null),
         fetchCongressionalConvergence(candidate.symbol).catch(() => null),
+        // Real market cap (Phase K) — the enriched bundle below hardcoded
+        // this to 0, which silently gated Altman Z's real distress check
+        // off entirely (it requires marketCap > 0) even once real
+        // balance-sheet data existed. Cheap: profile2 is a single lookup,
+        // already used elsewhere in this file for cap-tier classification.
+        fetchFinnhubProfile2(candidate.symbol).catch(() => ({ marketCapMillions: null })),
       ]);
       if (trend) ratingTrendBySymbol.set(candidate.symbol, trend);
       if (earnings) earningsBySymbol.set(candidate.symbol, earnings);
@@ -1015,7 +1022,7 @@ export async function runScreener(
             name: candidate.companyName,
             price: candidate.price,
             changePercentage: snap?.changePercentage ?? 0,
-            marketCap: 0,
+            marketCap: profile2.marketCapMillions !== null ? profile2.marketCapMillions * 1_000_000 : 0,
             currency: "USD",
             yearHigh: fundamentals.week52High,
             yearLow: fundamentals.week52Low,
@@ -1028,7 +1035,12 @@ export async function runScreener(
           historicalMonthly: monthlyHistory,
           income: financialsTrend.income,
           cashFlow: financialsTrend.cashFlow,
-          balanceSheet: [], // Finnhub-sourced enrichment — no clean balance-sheet equivalent yet, see buildFinnhubBundle
+          // Phase K: real balance-sheet data extracted from the same
+          // financials-reported call above, when this filer reports the 5
+          // standard tags Altman Z needs (non-financial firms; banks
+          // structurally don't report a current/noncurrent split — see
+          // fetchFinnhubFinancialsTrendUncached's real, confirmed-live gap).
+          balanceSheet: financialsTrend.balanceSheet,
         };
         const sf = computeSnowflake(enrichedBundle, peerValuation);
         // Otto's own conservative forecast (same deterministic model used on
@@ -1290,20 +1302,16 @@ export async function runScreener(
       // increase, real congressional purchase disclosure. Only rewards
       // real agreement ACROSS categories, on top of (not instead of) each
       // category's own individual nudge above.
-      const convergenceCount =
-        (c.insiderActivity?.direction === "buying" ? 1 : 0) +
-        (institutionalBySymbol.get(c.symbol) ? 1 : 0) +
-        (congressionalBySymbol.get(c.symbol) ? 1 : 0);
-      if (convergenceCount >= 2) {
-        const sources = [
-          c.insiderActivity?.direction === "buying" ? "insiders" : null,
-          institutionalBySymbol.get(c.symbol) ? "13F managers" : null,
-          congressionalBySymbol.get(c.symbol) ? "Congress" : null,
-        ].filter((s): s is string => s !== null);
+      const convergence = computeConvergence({
+        insiderBuying: c.insiderActivity?.direction === "buying",
+        institutionalBuying: !!institutionalBySymbol.get(c.symbol),
+        congressionalBuying: !!congressionalBySymbol.get(c.symbol),
+      });
+      if (convergence) {
         nudges.push({
           type: "convergence",
-          label: `Real convergence: ${sources.join(" + ")} all buying independently`,
-          points: (convergenceCount - 1) * CONVERGENCE_NUDGE_PER_EXTRA,
+          label: `Real convergence: ${convergence.sources.join(" + ")} all buying independently`,
+          points: (convergence.count - 1) * CONVERGENCE_NUDGE_PER_EXTRA,
         });
       }
       // Fail-fast kill switch: a factor net-negative on real evaluated

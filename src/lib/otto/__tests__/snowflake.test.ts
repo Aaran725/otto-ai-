@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeSnowflake, computeAltmanZScore, computeBeneishMScore, compute12to1Momentum } from "../snowflake";
+import { computeSnowflake, computeAltmanZScore, computeBeneishMScore, computeConvergence, compute12to1Momentum } from "../snowflake";
 import type { StockBundle } from "../fmp";
 import type { PeerValuation, PeerPercentiles } from "../peers";
 
@@ -525,6 +525,24 @@ describe("computeBeneishMScore — the real, standard 1999 formula", () => {
 
     const withoutSecondYear = computeSnowflake(emptyBundle());
     expect(withoutSecondYear.quality.checks.some((c) => c.label.includes("Beneish M-Score"))).toBe(false);
+  });
+});
+
+describe("computeConvergence — the shared 2+ independent real categories check", () => {
+  it("returns null when zero or only one real category is buying", () => {
+    expect(computeConvergence({ insiderBuying: false, institutionalBuying: false, congressionalBuying: false })).toBeNull();
+    expect(computeConvergence({ insiderBuying: true, institutionalBuying: false, congressionalBuying: false })).toBeNull();
+    expect(computeConvergence({ insiderBuying: false, institutionalBuying: true, congressionalBuying: false })).toBeNull();
+  });
+
+  it("returns the real count and named sources once 2 independent categories agree", () => {
+    const result = computeConvergence({ insiderBuying: true, institutionalBuying: true, congressionalBuying: false });
+    expect(result).toEqual({ count: 2, sources: ["insiders", "13F managers"] });
+  });
+
+  it("returns count 3 with all three named sources when every category agrees", () => {
+    const result = computeConvergence({ insiderBuying: true, institutionalBuying: true, congressionalBuying: true });
+    expect(result).toEqual({ count: 3, sources: ["insiders", "13F managers", "Congress"] });
   });
 });
 

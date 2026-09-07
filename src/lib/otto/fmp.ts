@@ -514,16 +514,31 @@ async function buildStockBundle(symbol: string): Promise<StockBundle> {
             : undefined,
       }));
 
+    // Reversed to match income/cashFlow's oldest-first convention — FMP
+    // returns newest-first, and `snowflake.ts` reads `.at(-1)` everywhere
+    // expecting "latest." Confirmed this was a latent bug: it never
+    // mattered while this fetch was limit:1 (a single element has no order
+    // to get wrong), but widening it to limit:5 for Beneish's real YoY
+    // sub-indices would have silently handed Altman Z and Beneish the
+    // OLDEST year instead of the latest.
+    let resolvedBalanceSheet = (balanceSheet ?? []).slice().reverse();
+
     // Same whitelist gate as ratios/key-metrics — FMP blocks
-    // /income-statement and /cash-flow-statement for some tickers
-    // regardless of size (confirmed: CRWD, RDDT, TEM, MARA). Fall back to
-    // Finnhub's free financials-reported (real SEC filing data) instead of
-    // leaving the fundamentals chart empty.
-    if (resolvedIncome.length === 0) {
+    // /income-statement, /cash-flow-statement, and /balance-sheet-statement
+    // for some tickers regardless of size (confirmed: CRWD, RDDT, TEM,
+    // MARA). Fall back to Finnhub's free financials-reported (real SEC
+    // filing data) instead of leaving the fundamentals chart — and, since
+    // Phase K, Altman Z's real distress check — empty. The two fallbacks
+    // are independent: a ticker missing one FMP statement isn't guaranteed
+    // to be missing the other.
+    if (resolvedIncome.length === 0 || resolvedBalanceSheet.length === 0) {
       const trend = await fetchFinnhubFinancialsTrend(symbol);
       if (trend) {
-        resolvedIncome = trend.income;
-        resolvedCashFlow = trend.cashFlow;
+        if (resolvedIncome.length === 0) {
+          resolvedIncome = trend.income;
+          resolvedCashFlow = trend.cashFlow;
+        }
+        if (resolvedBalanceSheet.length === 0) resolvedBalanceSheet = trend.balanceSheet;
       }
     }
 
@@ -555,14 +570,7 @@ async function buildStockBundle(symbol: string): Promise<StockBundle> {
       historicalMonthly: resolvedHistorical,
       income: resolvedIncome,
       cashFlow: resolvedCashFlow,
-      // Reversed to match income/cashFlow's oldest-first convention — FMP
-      // returns newest-first, and every other statement here is flipped so
-      // `.at(-1)` reliably means "latest" everywhere. Confirmed this was a
-      // latent bug: it never mattered while this fetch was limit:1 (a
-      // single element has no order to get wrong), but widening it to
-      // limit:5 for Beneish's real YoY sub-indices would have silently
-      // handed Altman Z and Beneish the OLDEST year instead of the latest.
-      balanceSheet: (balanceSheet ?? []).slice().reverse(),
+      balanceSheet: resolvedBalanceSheet,
   };
 }
 
