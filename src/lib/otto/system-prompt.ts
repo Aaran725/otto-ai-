@@ -55,7 +55,12 @@ JSON. Match this shape exactly:
   (e.g. a richly-valued, low/no-FCF-yield name is more exposed to a high 10-year yield;
   a strong-FCF, low-multiple name is more insulated). Don't lecture about macro in
   general — one sentence, only if genuinely relevant to this company's valuation or
-  balance sheet. When macro is absent, don't mention it.
+  balance sheet. When macro is absent, don't mention it. When "macro.yieldCurveSpread"
+  is also present and NEGATIVE (an inverted 2s10s yield curve — a real, well-known
+  recession-leading indicator), that's a real reason to weight this stock's financial
+  health/balance-sheet resilience more heavily in your synthesis, especially for a
+  cyclical or highly-levered business — but only mention the yield curve by name if it's
+  genuinely load-bearing to your point, never as a generic disclaimer.
 - When "rateSensitivity" is present (high/moderate/low — already computed by comparing
   the stock's own FCF yield against the 10-year Treasury, never re-derive it yourself),
   use that exact word if you reference rate exposure — don't contradict it with your own

@@ -7,6 +7,16 @@ export interface MacroContext {
   treasury10Y: number;
   cpiYoyPct: number;
   asOf: string; // ISO date of the most recent series point used
+  // Real 2s10s yield-curve spread (Round 5, Phase O) — one of the most
+  // validated real recession-leading indicators in macro research,
+  // distinct from the fed-funds level itself (a curve can invert at
+  // moderate rates). Optional and NOT part of the gate below: a DGS2
+  // hiccup must never null out fedFundsRate/treasury10Y/cpiYoyPct for
+  // every existing consumer (rateSensitivity, the single-stock macro
+  // widget, the regime tilt's own fed-funds branch) just because this one
+  // newer, independent series had a bad day.
+  treasury2Y?: number;
+  yieldCurveSpread?: number; // treasury10Y - treasury2Y; negative means inverted
 }
 
 interface FredObservation {
@@ -37,14 +47,16 @@ async function fetchSeries(seriesId: string, limit: number): Promise<FredObserva
 export async function fetchMacroContext(): Promise<MacroContext | null> {
   return getMacroCache<MacroContext | null>().getOrSet("macro-context", async () => {
     try {
-      const [fedFunds, treasury, cpi] = await Promise.all([
+      const [fedFunds, treasury, treasury2, cpi] = await Promise.all([
         fetchSeries("FEDFUNDS", 1),
         fetchSeries("DGS10", 5), // a few points back in case the latest 1-2 days are holidays/missing
+        fetchSeries("DGS2", 5), // same real-data-gap tolerance as DGS10 above
         fetchSeries("CPIAUCSL", 13),
       ]);
 
       const fedFundsRate = fedFunds[0] ? Number(fedFunds[0].value) : null;
       const treasury10Y = treasury[0] ? Number(treasury[0].value) : null;
+      const treasury2Y = treasury2[0] ? Number(treasury2[0].value) : null;
 
       let cpiYoyPct: number | null = null;
       if (cpi.length >= 12) {
@@ -60,6 +72,7 @@ export async function fetchMacroContext(): Promise<MacroContext | null> {
         treasury10Y,
         cpiYoyPct: Math.round(cpiYoyPct * 10) / 10,
         asOf: fedFunds[0].date,
+        ...(treasury2Y !== null ? { treasury2Y, yieldCurveSpread: Math.round((treasury10Y - treasury2Y) * 100) / 100 } : {}),
       };
     } catch {
       return null;

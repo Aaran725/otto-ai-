@@ -509,7 +509,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 14; // v14: Phase N — completed the real Piotroski F-Score's remaining 4 checks (ΔLeverage/ΔLiquidity in financialHealth, ΔMargin/ΔAsset-Turnover in growth), all zero-new-fetch reads of data Phase J's balance-sheet widening already produced
+const SCORING_VERSION = 15; // v15: Phase O — real yield-curve inversion (FRED DGS2/DGS10 2s10s spread) layered on top of the existing fed-funds regime tilt, affecting screener ranking whenever the curve is inverted
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
@@ -546,21 +546,42 @@ export const ASCENDING_INTENTS = new Set<ScreenIntent>(["avoid"]);
  * growth and risk-taking. Between ~3% and ~4.5% Fed funds, weights stay at
  * the base (no strong regime signal either way).
  */
-function applyRegimeTilt(
+function multiplyTilt(
   weights: Partial<Record<SnowflakeAxis, number>>,
-  macro: { fedFundsRate: number } | null
+  tilt: Partial<Record<SnowflakeAxis, number>> | null
 ): Partial<Record<SnowflakeAxis, number>> {
-  if (!macro) return weights;
-  let tilt: Partial<Record<SnowflakeAxis, number>> | null = null;
-  if (macro.fedFundsRate >= 4.5) {
-    tilt = { quality: 1.25, financialHealth: 1.25, growth: 0.85, momentum: 0.9 };
-  } else if (macro.fedFundsRate <= 3) {
-    tilt = { growth: 1.2, momentum: 1.15, quality: 0.9 };
-  }
   if (!tilt) return weights;
   const adjusted: Partial<Record<SnowflakeAxis, number>> = { ...weights };
   for (const axis of Object.keys(tilt) as SnowflakeAxis[]) {
     if (adjusted[axis] !== undefined) adjusted[axis] = adjusted[axis]! * tilt[axis]!;
+  }
+  return adjusted;
+}
+
+export function applyRegimeTilt(
+  weights: Partial<Record<SnowflakeAxis, number>>,
+  macro: { fedFundsRate: number; yieldCurveSpread?: number } | null
+): Partial<Record<SnowflakeAxis, number>> {
+  if (!macro) return weights;
+  let fedFundsTilt: Partial<Record<SnowflakeAxis, number>> | null = null;
+  if (macro.fedFundsRate >= 4.5) {
+    fedFundsTilt = { quality: 1.25, financialHealth: 1.25, growth: 0.85, momentum: 0.9 };
+  } else if (macro.fedFundsRate <= 3) {
+    fedFundsTilt = { growth: 1.2, momentum: 1.15, quality: 0.9 };
+  }
+  let adjusted = multiplyTilt(weights, fedFundsTilt);
+
+  // Real yield-curve inversion (Round 5, Phase O) — the 2s10s spread
+  // (fred.ts's yieldCurveSpread) going negative is one of the most
+  // validated real recession-leading indicators in macro research, and a
+  // genuinely distinct signal from the fed-funds level above: a curve can
+  // invert at moderate rates, and a high-flat-funds regime isn't
+  // automatically inverted. Layered ON TOP of the fed-funds tilt (both
+  // can fire together), not a replacement for it — a smaller magnitude
+  // than the fed-funds tilt since it's a compounding, secondary signal,
+  // not the primary regime read.
+  if (macro.yieldCurveSpread !== undefined && macro.yieldCurveSpread < 0) {
+    adjusted = multiplyTilt(adjusted, { quality: 1.15, financialHealth: 1.15, growth: 0.9, momentum: 0.92 });
   }
   return adjusted;
 }
