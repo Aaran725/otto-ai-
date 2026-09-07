@@ -21,6 +21,8 @@ import { fetchInsiderClusterFeed, type InsiderClusterEntry } from "./insider-fee
 import { fetchRiskFactorExcerpt } from "./sec-edgar";
 import { fetchMacroContext } from "./fred";
 import { fetchImpliedFedFundsRate } from "./kalshi";
+import { fetchInstitutionalConvergence } from "./sec-13f";
+import { fetchCongressionalConvergence } from "./house-stock-act";
 import { fetchPeerValuation, type PeerValuation } from "./peers";
 import { fetchEarningsRecord, type EarningsRecord } from "./earnings";
 import { fetchShortInterest, type ShortInterestData } from "./short-interest";
@@ -46,7 +48,8 @@ export type NudgeType =
   | "sectorValuation"
   | "forecastUpside"
   | "earnings"
-  | "shortInterest";
+  | "shortInterest"
+  | "convergence";
 
 export interface ScreenerWhyNudge {
   type: NudgeType;
@@ -196,12 +199,13 @@ export function detectCapFilter(message: string): CapFilter | null {
   return null;
 }
 
-// Deterministic PRNG (mulberry32) seeded with a fixed constant — not
-// Math.random(). A screen's candidate pool is now a *stable, reproducible*
-// draw: the same "extra" slice of the universe every time, so a re-scan
-// after the cache expires surfaces the same ranking unless the underlying
-// market data actually changed, instead of a fresh random sample that could
-// miss a genuinely strong candidate purely by luck of the draw.
+// Deterministic PRNG (mulberry32) — not Math.random(). A screen's
+// candidate pool is a *stable, reproducible* draw within a single day
+// (see poolSeedForToday below): the same "extra" slice of the universe
+// on every re-scan today, so a cache refresh surfaces the same ranking
+// unless the underlying market data actually changed, instead of a fresh
+// random sample that could miss a genuinely strong candidate purely by
+// luck of the draw.
 function mulberry32(seed: number) {
   let state = seed | 0;
   return function random() {
@@ -211,10 +215,26 @@ function mulberry32(seed: number) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-const POOL_SEED = 20260101;
+
+/**
+ * Rotates by real calendar day — confirmed live this actually mattered:
+ * the seed used to be a literal hardcoded constant with zero rotation,
+ * so the "extra" (non-anchor) slice of every screen's candidate pool was
+ * byte-for-byte identical forever, not just "reproducible today." No
+ * amount of scoring refinement (Phases A-I) could ever surface a
+ * genuinely different company under that fixed pool — only reorder the
+ * same ~450 names. Rotating daily keeps today's reproducibility property
+ * (same pattern the prewarm cron already uses for its own daily slice)
+ * while actually letting more of the real universe take a turn over time.
+ */
+function dayOfYear(): number {
+  const now = new Date();
+  const start = Date.UTC(now.getUTCFullYear(), 0, 0);
+  return Math.floor((now.getTime() - start) / (24 * 60 * 60 * 1000));
+}
 
 function seededShuffle<T>(arr: T[], seedOffset = 0): T[] {
-  const random = mulberry32(POOL_SEED + seedOffset);
+  const random = mulberry32(dayOfYear() + seedOffset);
   const copy = [...arr];
   for (let i = copy.length - 1; i > 0; i--) {
     const j = Math.floor(random() * (i + 1));
@@ -488,7 +508,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 9; // v9: Phase D — real academic 12-1 momentum factor (excludes the most recent month, real short-term-reversal research) in the momentum axis
+const SCORING_VERSION = 11; // v11: Phase I convergence bonus (v10) + fixed the real root cause of "same companies every day" — the candidate pool's seed was a hardcoded constant with zero rotation ever, now rotates by real calendar day
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
@@ -891,10 +911,29 @@ export async function runScreener(
     const sectorPercentileBySymbol = new Map<string, number>();
     const earningsBySymbol = new Map<string, EarningsRecord>();
     const shortInterestBySymbol = new Map<string, ShortInterestData>();
+    // Real convergence inputs (Phase I) — both calls are cheap in practice:
+    // each wraps its own long-cached aggregate (13F: per-manager, 24h;
+    // Congress: one shared recent-buying map, 12h), single-flighted across
+    // concurrent semifinalists, so only the very first candidate to touch a
+    // cold cache pays the real fetch cost — every other candidate in this
+    // same scan reads the warm result.
+    const institutionalBySymbol = new Map<string, boolean>();
+    const congressionalBySymbol = new Map<string, boolean>();
 
     const withInsider = await mapWithConcurrency(semifinalists, 4, async (candidate) => {
-      const [activity, trend, fundamentals, financialsTrend, snap, priceTarget, earnings, shortInterest, monthlyHistory] =
-        await Promise.all([
+      const [
+        activity,
+        trend,
+        fundamentals,
+        financialsTrend,
+        snap,
+        priceTarget,
+        earnings,
+        shortInterest,
+        monthlyHistory,
+        institutionalConvergence,
+        congressionalConvergence,
+      ] = await Promise.all([
         fetchInsiderActivity(candidate.symbol).catch(() => null),
         fetchFinnhubRatingTrend(candidate.symbol).catch(() => null),
         fetchFinnhubFundamentals(candidate.symbol).catch(() => null),
@@ -928,10 +967,18 @@ export async function runScreener(
         fetchAlpacaHistoricalMonthly(candidate.symbol)
           .then((points) => (points.length > 0 ? points : fetchYahooHistoricalMonthly(candidate.symbol)))
           .catch(() => []),
+        fetchInstitutionalConvergence(candidate.companyName).catch(() => null),
+        fetchCongressionalConvergence(candidate.symbol).catch(() => null),
       ]);
       if (trend) ratingTrendBySymbol.set(candidate.symbol, trend);
       if (earnings) earningsBySymbol.set(candidate.symbol, earnings);
       if (shortInterest) shortInterestBySymbol.set(candidate.symbol, shortInterest);
+      if (institutionalConvergence && institutionalConvergence.increasedCount > 0) {
+        institutionalBySymbol.set(candidate.symbol, true);
+      }
+      if (congressionalConvergence && congressionalConvergence.buyerCount > 0) {
+        congressionalBySymbol.set(candidate.symbol, true);
+      }
       const pe = fundamentals?.ratios?.priceToEarningsRatio;
       let peerValuation: PeerValuation | null = null;
       if (pe !== undefined) {
@@ -1129,6 +1176,17 @@ export async function runScreener(
     const FORECAST_UPSIDE_NUDGE_MAX = intent === "momentum" ? 16 : intent === "undervalued" ? 12 : intent === "best" ? 8 : 6; // scaled by upside%, capped at +/-50%
     const EARNINGS_NUDGE_MAX = 3; // scaled by beat/miss ratio over the last up-to-4 reported quarters
     const SHORT_INTEREST_NUDGE_MAX = 3; // high/rising short interest is a red flag regardless of intent
+    // Phase I — the real structural idea, not just another nudge: once
+    // Congress (Phase F) and 13F (Phase E) tracking both existed alongside
+    // insider Form 4 buying (already built), there was a genuinely
+    // different, higher-order signal sitting unused — how many
+    // INDEPENDENT real actors are buying the same stock at once. A CEO
+    // buying with their own money, a representative disclosing a real
+    // purchase, and real institutional managers increasing their position
+    // are three unrelated sources; when 2+ agree, that's categorically
+    // stronger evidence than any one alone. Only fires on real agreement —
+    // never fabricates convergence from one category counted twice.
+    const CONVERGENCE_NUDGE_PER_EXTRA = 4;
     // Derives from buildWhyNudges (defined below) rather than recomputing
     // the same nudges a second time — the two used to be independent,
     // hand-synced implementations of the same math (a real drift risk,
@@ -1225,6 +1283,28 @@ export async function runScreener(
             : `Short interest risk (${shortInterest.daysToCover.toFixed(1)} days to cover)`;
           nudges.push({ type: "shortInterest", label, points });
         }
+      }
+      // Real convergence bonus (Phase I): count independent real buying
+      // signals already computed above/elsewhere for this exact
+      // candidate — insider Form 4 buying, real 13F institutional
+      // increase, real congressional purchase disclosure. Only rewards
+      // real agreement ACROSS categories, on top of (not instead of) each
+      // category's own individual nudge above.
+      const convergenceCount =
+        (c.insiderActivity?.direction === "buying" ? 1 : 0) +
+        (institutionalBySymbol.get(c.symbol) ? 1 : 0) +
+        (congressionalBySymbol.get(c.symbol) ? 1 : 0);
+      if (convergenceCount >= 2) {
+        const sources = [
+          c.insiderActivity?.direction === "buying" ? "insiders" : null,
+          institutionalBySymbol.get(c.symbol) ? "13F managers" : null,
+          congressionalBySymbol.get(c.symbol) ? "Congress" : null,
+        ].filter((s): s is string => s !== null);
+        nudges.push({
+          type: "convergence",
+          label: `Real convergence: ${sources.join(" + ")} all buying independently`,
+          points: (convergenceCount - 1) * CONVERGENCE_NUDGE_PER_EXTRA,
+        });
       }
       // Fail-fast kill switch: a factor net-negative on real evaluated
       // outcomes for a full rolling quarter gets zeroed out here, not

@@ -21,6 +21,7 @@ const NUDGE_TYPE_LABELS: Record<string, string> = {
   forecastUpside: "Forecast upside",
   earnings: "Earnings track record",
   shortInterest: "Short interest risk",
+  convergence: "Real convergence (insider + 13F + Congress)",
 };
 
 export const metadata = { title: "Otto's Track Record — every real pick, unedited" };
