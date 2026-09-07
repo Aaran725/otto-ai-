@@ -14,6 +14,19 @@ export interface ScreenQueryRequirements {
   minRevenueGrowthPct?: number;
   minROICPct?: number;
   minFCFYieldPct?: number;
+  // Round 6, Phase V — explicit, checkable requirements drawn straight from
+  // Otto's own real, deterministic Snowflake checks (snowflake.ts), not
+  // just implicit ranking nudges. Applied as a hard post-enrichment filter
+  // in screener.ts's passesExplicitChecks, not a Stage-1 pool filter — the
+  // underlying checks (Beneish, Altman Z, margin stability, convergence)
+  // only exist once Stage 3 enrichment has run for a semifinalist. Only a
+  // REAL, computed failure excludes a candidate — missing/thin-coverage
+  // data never counts as a failure (same discipline as every check itself).
+  noEarningsManipulationRisk?: boolean; // Beneish M-Score must not have failed
+  noBankruptcyRisk?: boolean; // Altman Z-Score must not have failed
+  stableMargins?: boolean; // the margin-stability check must not have failed
+  noInsiderSelling?: boolean; // excludes only a candidate with CONFIRMED recent insider selling
+  requiresRealConvergence?: boolean; // 2+ independent real buyers (insider/13F/Congress) must actually agree
 }
 
 export interface ScreenQuery {
@@ -31,7 +44,11 @@ const SYSTEM_PROMPT = `You classify a user's free-form stock-market request into
   "theme": { "label": string, "keywords": string[] } | null,
   "minMarketCapMillions": number | null,
   "seedTickers": string[],
-  "requirements": { "maxPE": number, "minRevenueGrowthPct": number, "minROICPct": number, "minFCFYieldPct": number } | null,
+  "requirements": {
+    "maxPE": number, "minRevenueGrowthPct": number, "minROICPct": number, "minFCFYieldPct": number,
+    "noEarningsManipulationRisk": boolean, "noBankruptcyRisk": boolean, "stableMargins": boolean,
+    "noInsiderSelling": boolean, "requiresRealConvergence": boolean
+  } | null,
   "requiresInsiderBuying": boolean
 }
 
@@ -41,7 +58,13 @@ Rules:
 - "theme" describes a specific sector/niche/industry focus, if the user named one (e.g. "physical AI / robotics", "quantum computing", "cybersecurity", "space", "EV batteries", "humanoid robots"). "label" is a short display name (2-4 words). "keywords" is 4-8 REAL industry/business-model terms actually used to describe such companies (e.g. for "physical AI": ["robotics","humanoid","industrial automation","autonomous systems","actuators","sensors"]) — used to match against real company industry classifications. Use null if the user didn't name a sector/niche.
 - A THESIS or BENEFICIARY-style question — "who benefits most from X", "which stocks would gain if X happens", "picks and shovels for X", "who supplies/powers X" — names a real theme just as much as a direct sector mention does, it's just phrased indirectly. Treat X as the theme: set "label" to a short name for X, "keywords" to the real industry/business-model terms of companies that would genuinely benefit from X (not X's own literal industry if that's different — e.g. "who benefits from AI datacenter buildout" means companies that BUILD/SUPPLY/POWER datacenters — power infrastructure, cooling systems, semiconductor fabrication, data-center REITs, networking hardware — not just generic "AI" software companies), and name real "seedTickers" whose core business genuinely fits that beneficiary relationship. If the user didn't also specify a ranking style (cheap vs. hot vs. safe), set "intent" to "best" — a thesis question is asking "who's positioned to win," which "best" already captures as a general composite ranking.
 - "seedTickers" is a list (0-12) of REAL, currently-trading, publicly-listed company ticker symbols whose PRIMARY, core business is genuinely in the requested theme/niche — not a company with only minor/incidental exposure, a coincidentally similar name, or a loosely related sector. For a narrow/specific niche (e.g. "physical AI", "quantum computing") this list is the PRIMARY way real companies reach the screen — a generic industry-code match often can't find them — so name every real, core-business-relevant, currently-listed company you're confident about, not just one or two, but double-check each one actually belongs before including it. Example of what NOT to do: for "cybersecurity stocks", include CrowdStrike/Palo Alto Networks/Fortinet (core business is cybersecurity) but do NOT include a large, well-known company just because it's prominent or vaguely tech-adjacent (e.g. Sanofi is a pharmaceutical company — wrong for "cybersecurity" even though it's a large real company). Every ticker is independently checked against a live market data feed for existence (not relevance) before use, so a wrong guess still reaches the user — precision here matters more than a long list. Use each company's EXACT, full ticker symbol (e.g. "TENB" for Tenable, not a truncated "TEN" — a truncated symbol can silently resolve to a completely different real company). Never invent a plausible-looking symbol or include a private/delisted company.
-- "requirements" captures explicit numeric thresholds the user actually stated (a P/E ceiling, a minimum revenue growth %, a minimum ROIC %, a minimum free cash flow yield %). Only include fields the user gave a real number for. Use null if none were stated.
+- "requirements" captures explicit thresholds/criteria the user actually stated. Numeric fields: a P/E ceiling, a minimum revenue growth %, a minimum ROIC %, a minimum free cash flow yield %. Only include a field the user gave a real number for. Boolean fields — set true ONLY when the user's own words clearly asked for that specific, real check (never infer one from a generic "safe"/"quality" request that doesn't name the actual criterion — that's what "intent": "quality" already covers):
+  - "noEarningsManipulationRisk": phrases like "no signs of manipulation", "clean books", "no accounting red flags", "not cooking the books".
+  - "noBankruptcyRisk": phrases like "not at bankruptcy risk", "no distress risk", "financially solid" (not just "safe" alone — that's the "quality" intent).
+  - "stableMargins": phrases like "stable margins", "consistent profitability", "not cyclical", "durable moat".
+  - "noInsiderSelling": phrases like "no insider selling", "insiders aren't dumping", "management isn't selling" (distinct from "requiresInsiderBuying" below, which wants CONFIRMED buying — this one just excludes confirmed sellers).
+  - "requiresRealConvergence": phrases like "real institutional buying", "smart money buying together", "insiders and funds both buying", "Congress and hedge funds both accumulating" — specifically MULTIPLE independent categories agreeing, not just one (a single "institutions are buying" alone doesn't need this field — only set it when the user wants that cross-category agreement specifically).
+  Use null for the whole "requirements" object if none of the numeric or boolean criteria were stated.
 - "minMarketCapMillions" only if the user gave an explicit cap floor beyond generic "mega cap" wording (e.g. "above $50 billion" -> 50000). Use null otherwise.
 - "requiresInsiderBuying" is true only if the user explicitly asked for stocks with insider buying / executives or insiders buying shares / insider accumulation (including misspellings like "inside rbuying"). Otherwise false.
 
@@ -56,6 +79,26 @@ You are only classifying the request and naming real companies you're confident 
  * effort: on any failure (rate limit, malformed JSON) the caller falls back
  * to the regex-detected result, so this only ever refines, never blocks.
  */
+/**
+ * Strips explicit `null`s the model writes for a field it means to leave
+ * unset — a real, live-confirmed failure mode: the model fills in every
+ * declared schema key rather than omitting unset ones, and `req.maxPE !==
+ * undefined` treats a literal `null` as "the user specified this," which
+ * then coerces to 0 in a numeric comparison and silently rejects every
+ * real candidate (confirmed live: "cheap stocks with no insider selling"
+ * returned a "P/E under null" zero-results message and killed the entire
+ * pool before this fix). Exported for direct testing.
+ */
+export function sanitizeRequirements(raw: ScreenQueryRequirements | null | undefined): ScreenQueryRequirements | null {
+  if (!raw) return null;
+  const cleaned: ScreenQueryRequirements = {};
+  for (const key of Object.keys(raw) as (keyof ScreenQueryRequirements)[]) {
+    const value = raw[key];
+    if (value !== null && value !== undefined) (cleaned as Record<string, unknown>)[key] = value;
+  }
+  return Object.keys(cleaned).length > 0 ? cleaned : null;
+}
+
 export async function interpretScreenQuery(message: string): Promise<ScreenQuery | null> {
   try {
     return await withKeyRotation(async (client) => {
@@ -70,7 +113,8 @@ export async function interpretScreenQuery(message: string): Promise<ScreenQuery
       });
       const content = completion.choices[0]?.message?.content;
       if (!content) return null;
-      return JSON.parse(content) as ScreenQuery;
+      const parsed = JSON.parse(content) as ScreenQuery;
+      return { ...parsed, requirements: sanitizeRequirements(parsed.requirements) };
     });
   } catch {
     return null;

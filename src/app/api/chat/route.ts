@@ -210,9 +210,30 @@ export async function POST(request: Request) {
               // clean sweep genuinely can mean "nothing today clears the
               // bar," not just a data-provider hiccup. Say that honestly
               // instead of serving a mediocre pick to fill 5 slots.
+              // Round 6, Phase W — name the SPECIFIC criteria that made this
+              // a clean sweep, not just a generic "requirements" mention.
+              // Otto's own explicit checks (Beneish, Altman Z, margin
+              // stability, real convergence) are all real, deterministic
+              // pass/fail gates (see passesExplicitChecks in screener.ts) —
+              // combined together, especially with real convergence, they
+              // can legitimately clear out every candidate on a given day,
+              // and the honest response names which ones so the user knows
+              // what to loosen, not just that "something" didn't match.
+              const requirementLabels = [
+                requirements?.maxPE !== undefined ? `P/E under ${requirements.maxPE}` : null,
+                requirements?.minRevenueGrowthPct !== undefined ? `revenue growth above ${requirements.minRevenueGrowthPct}%` : null,
+                requirements?.minROICPct !== undefined ? `ROIC above ${requirements.minROICPct}%` : null,
+                requirements?.minFCFYieldPct !== undefined ? `FCF yield above ${requirements.minFCFYieldPct}%` : null,
+                requirements?.noEarningsManipulationRisk ? "no signs of earnings manipulation" : null,
+                requirements?.noBankruptcyRisk ? "no real bankruptcy risk" : null,
+                requirements?.stableMargins ? "stable margins" : null,
+                requirements?.noInsiderSelling ? "no confirmed insider selling" : null,
+                requirements?.requiresRealConvergence ? "real institutional/insider/congressional convergence" : null,
+                requireInsiderBuying ? "confirmed insider buying" : null,
+              ].filter((l): l is string => l !== null);
               const reply =
-                requirements || requireInsiderBuying
-                  ? "Screened the market, but nothing currently trading meets all of those requirements together — try loosening one (a lower growth bar, a higher P/E ceiling, or dropping the insider-buying requirement)."
+                requirementLabels.length > 0
+                  ? `Screened the market, but nothing currently trading meets all of these together: ${requirementLabels.join(", ")}. Try dropping one — real convergence and manipulation/distress checks especially can clear out an entire day's pool when combined with tight numeric filters.`
                   : screenIntent === "undervalued"
                     ? "Screened the market, but nothing right now clears the bar for genuinely undervalued — at least 15% real forecast upside to target, not just a cheap-looking ratio. Try again later as prices move, or ask about a specific ticker."
                     : screenIntent === "best"

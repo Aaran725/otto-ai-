@@ -538,7 +538,7 @@ async function buildStockBundle(symbol: string): Promise<StockBundle> {
           resolvedIncome = trend.income;
           resolvedCashFlow = trend.cashFlow;
         }
-        if (resolvedBalanceSheet.length === 0) resolvedBalanceSheet = trend.balanceSheet;
+        if (resolvedBalanceSheet.length === 0) resolvedBalanceSheet = trend.balanceSheet ?? [];
       }
     }
 

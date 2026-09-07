@@ -2,9 +2,26 @@ import type { StockBundle } from "./fmp";
 import { computeTechnicals } from "./technicals";
 import type { PeerValuation } from "./peers";
 
+// Round 6, Phase U — stable identities for the ~7 "named, branded" checks
+// worth making explicitly requestable as a real search criterion (Phase V),
+// not just an implicit ranking nudge. A dynamic label alone (e.g. `Altman
+// Z-Score (${z.toFixed(2)})...`) embeds a computed value and can't be
+// string-matched reliably; a stable id can. Not every check needs one — a
+// flat numeric threshold like "P/E under 25x" is already coverable via
+// ScreenQueryRequirements' own maxPE field.
+export type SnowflakeCheckId =
+  | "altmanZ"
+  | "beneishMScore"
+  | "marginStability"
+  | "piotroskiLeverage"
+  | "piotroskiLiquidity"
+  | "piotroskiMargin"
+  | "piotroskiAssetTurnover";
+
 export interface SnowflakeCheck {
   label: string;
   passed: boolean;
+  id?: SnowflakeCheckId;
 }
 
 export interface SnowflakeAxisScore {
@@ -355,12 +372,12 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
   ) {
     const grossMarginLatest = (latestIncome.revenue - latestIncome.costOfRevenue) / latestIncome.revenue;
     const grossMarginPrior = (priorIncome.revenue - priorIncome.costOfRevenue) / priorIncome.revenue;
-    growthChecks.push({ label: "Gross margin improving YoY", passed: grossMarginLatest > grossMarginPrior });
+    growthChecks.push({ id: "piotroskiMargin", label: "Gross margin improving YoY", passed: grossMarginLatest > grossMarginPrior });
   }
   if (latestIncome && priorIncome && latestBalanceSheet && priorBalanceSheet && priorBalanceSheet.totalAssets > 0 && latestBalanceSheet.totalAssets > 0) {
     const assetTurnoverLatest = latestIncome.revenue / latestBalanceSheet.totalAssets;
     const assetTurnoverPrior = priorIncome.revenue / priorBalanceSheet.totalAssets;
-    growthChecks.push({ label: "Asset turnover improving YoY", passed: assetTurnoverLatest > assetTurnoverPrior });
+    growthChecks.push({ id: "piotroskiAssetTurnover", label: "Asset turnover improving YoY", passed: assetTurnoverLatest > assetTurnoverPrior });
   }
   const growth = axis(growthChecks);
 
@@ -456,6 +473,7 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
     );
     if (m !== null) {
       qualityChecks.push({
+        id: "beneishMScore",
         label: `Beneish M-Score (${m.toFixed(2)}) shows no signs of earnings manipulation`,
         passed: m < -1.78,
       });
@@ -473,6 +491,7 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
   const marginStability = computeGrossMarginStability(grossMargins);
   if (marginStability !== null) {
     qualityChecks.push({
+      id: "marginStability",
       label: `Stable gross margins (${(marginStability * 100).toFixed(1)}% variation) — low cyclicality`,
       passed: marginStability < 0.05,
     });
@@ -516,7 +535,7 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
       revenue: latestIncome.revenue,
     });
     if (z !== null) {
-      financialHealthChecks.push({ label: `Altman Z-Score (${z.toFixed(2)}) signals low bankruptcy risk`, passed: z > 1.81 });
+      financialHealthChecks.push({ id: "altmanZ", label: `Altman Z-Score (${z.toFixed(2)}) signals low bankruptcy risk`, passed: z > 1.81 });
     }
   }
   // Piotroski's leverage/liquidity pair (Round 5, Phase N) — real
@@ -532,7 +551,7 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
   ) {
     const leverageLatest = latestBalanceSheet.longTermDebt / latestBalanceSheet.totalAssets;
     const leveragePrior = priorBalanceSheet.longTermDebt / priorBalanceSheet.totalAssets;
-    financialHealthChecks.push({ label: "Long-term leverage decreasing YoY", passed: leverageLatest < leveragePrior });
+    financialHealthChecks.push({ id: "piotroskiLeverage", label: "Long-term leverage decreasing YoY", passed: leverageLatest < leveragePrior });
   }
   if (
     latestBalanceSheet &&
@@ -542,7 +561,7 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
   ) {
     const currentRatioLatest = latestBalanceSheet.totalCurrentAssets / latestBalanceSheet.totalCurrentLiabilities;
     const currentRatioPrior = priorBalanceSheet.totalCurrentAssets / priorBalanceSheet.totalCurrentLiabilities;
-    financialHealthChecks.push({ label: "Current ratio (liquidity) improving YoY", passed: currentRatioLatest > currentRatioPrior });
+    financialHealthChecks.push({ id: "piotroskiLiquidity", label: "Current ratio (liquidity) improving YoY", passed: currentRatioLatest > currentRatioPrior });
   }
   const financialHealth = axis(financialHealthChecks);
 

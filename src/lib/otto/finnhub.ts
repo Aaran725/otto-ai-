@@ -391,7 +391,15 @@ type FinancialsTrend = { income: FmpIncomeStatement[]; cashFlow: FmpCashFlowStat
 export async function fetchFinnhubFinancialsTrend(symbol: string): Promise<FinancialsTrend | null> {
   const cache = getFinnhubFinancialsTrendCache<FinancialsTrend>();
   const cached = await cache.get(symbol.toUpperCase());
-  if (cached) return cached;
+  // Real, live-confirmed failure mode: this cache holds a 24h TTL, and
+  // `balanceSheet` was only added to FinancialsTrend in Phase K — a value
+  // cached before that shipped is missing the field entirely (not `[]`,
+  // literally `undefined`), which crashed computeSnowflake's `.at(-1)` the
+  // moment a screener scan hit a symbol whose cache entry predated the
+  // schema change. Defensively backfill rather than trust every cached
+  // value to match today's shape — cheap, and correct for any future field
+  // added to this same cached type.
+  if (cached) return { ...cached, balanceSheet: cached.balanceSheet ?? [] };
   const result = await fetchFinnhubFinancialsTrendUncached(symbol);
   if (result) await cache.set(symbol.toUpperCase(), result);
   return result;

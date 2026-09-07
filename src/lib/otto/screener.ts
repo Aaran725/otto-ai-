@@ -8,7 +8,7 @@ import {
   fetchFinnhubFinancialsTrend,
 } from "./finnhub";
 import { fetchSecUniverse, fetchCikForSymbol, type UniverseEntry } from "./sec-universe";
-import { computeSnowflake, computeConvergence, type OttoSnowflakeScores } from "./snowflake";
+import { computeSnowflake, computeConvergence, type OttoSnowflakeScores, type SnowflakeAxisScore, type SnowflakeCheckId } from "./snowflake";
 import { getScreenerCache, getSymbolScoreCache, getDailyPriceCache } from "./cache";
 import { mapWithConcurrency } from "./batch";
 import { fetchAlpacaHistoricalDaily, fetchAlpacaHistoricalMonthly, type DailyPricePoint } from "./alpaca";
@@ -731,6 +731,54 @@ function passesRequirements(snap: Pick<SymbolSnapshot, "ratios" | "keyMetrics">,
   return true;
 }
 
+/** True only when the named check actually ran AND failed — missing/thin
+ * coverage never counts as a failure here, same discipline as every check
+ * in snowflake.ts itself ("never resolve missing data to a failed check"). */
+function checkFailed(axis: SnowflakeAxisScore | undefined, id: SnowflakeCheckId): boolean {
+  const check = axis?.checks.find((c) => c.id === id);
+  return check !== undefined && !check.passed;
+}
+
+/**
+ * Round 6, Phase V — the real "search gets smarter" gate: explicit,
+ * checkable requirements drawn straight from Otto's own already-computed
+ * Snowflake checks and real convergence logic, applied AFTER Stage 3
+ * enrichment (sf/insiderActivity/institutional-congressional convergence
+ * all need to exist first) — unlike passesRequirements above, which gates
+ * the wide Stage 1 pool on cheap ratios alone. A candidate that never got
+ * real enrichment (sf undefined) simply can't satisfy an explicit
+ * check-based requirement — same "missing data never fabricates a pass or
+ * a fail" discipline, but here "can't verify" reads as "doesn't satisfy an
+ * explicit ask" rather than silently letting it through, since the whole
+ * point of asking is a real, checkable guarantee.
+ *
+ * noInsiderSelling is the one exception with the opposite default: it's a
+ * NEGATIVE exclusion ("keep out confirmed sellers"), not a positive
+ * clearance ask, so a candidate with no insider data at all (the common
+ * case) passes rather than being excluded for a gap in coverage.
+ */
+export function passesExplicitChecks(
+  c: ScreenerCandidate,
+  req: ScreenQueryRequirements | null,
+  institutionalBySymbol: Map<string, boolean>,
+  congressionalBySymbol: Map<string, boolean>
+): boolean {
+  if (!req) return true;
+  if (req.noEarningsManipulationRisk && checkFailed(c.sf?.quality, "beneishMScore")) return false;
+  if (req.noBankruptcyRisk && checkFailed(c.sf?.financialHealth, "altmanZ")) return false;
+  if (req.stableMargins && checkFailed(c.sf?.quality, "marginStability")) return false;
+  if (req.noInsiderSelling && c.insiderActivity?.direction === "selling") return false;
+  if (req.requiresRealConvergence) {
+    const convergence = computeConvergence({
+      insiderBuying: c.insiderActivity?.direction === "buying",
+      institutionalBuying: !!institutionalBySymbol.get(c.symbol),
+      congressionalBuying: !!congressionalBySymbol.get(c.symbol),
+    });
+    if (!convergence) return false;
+  }
+  return true;
+}
+
 // How many candidates beyond the ranked top 5 to fetch daily price history
 // for — gives diversifySelection real room to swap out a correlated pick
 // for a genuine replacement instead of only being able to shrink the list.
@@ -1090,7 +1138,11 @@ export async function runScreener(
           // standard tags Altman Z needs (non-financial firms; banks
           // structurally don't report a current/noncurrent split — see
           // fetchFinnhubFinancialsTrendUncached's real, confirmed-live gap).
-          balanceSheet: financialsTrend.balanceSheet,
+          // Defensive fallback, not just fetchFinnhubFinancialsTrend's own
+          // fix — a real crash (`balanceSheet.at(-1)` in computeSnowflake)
+          // is worse than a silently-empty distress check, and this is the
+          // one place StockBundle actually gets constructed from it.
+          balanceSheet: financialsTrend.balanceSheet ?? [],
         };
         const sf = computeSnowflake(enrichedBundle, peerValuation);
         // Otto's own conservative forecast (same deterministic model used on
@@ -1194,6 +1246,32 @@ export async function runScreener(
       }
       return enriched;
     });
+
+    // Round 6, Phase V — explicit, checkable requirements (Beneish, Altman
+    // Z, margin stability, insider selling, real convergence) applied here,
+    // right after Stage 3 enrichment produced the real data each needs —
+    // excludes a candidate outright rather than just nudging its score, so
+    // an explicit ask ("no signs of earnings manipulation") is an actual
+    // guarantee about the final list, not a soft preference that a strong
+    // enough score elsewhere could still override.
+    const hasExplicitCheckRequirement = !!(
+      requirements?.noEarningsManipulationRisk ||
+      requirements?.noBankruptcyRisk ||
+      requirements?.stableMargins ||
+      requirements?.noInsiderSelling ||
+      requirements?.requiresRealConvergence
+    );
+    const explicitlyFiltered = requirements
+      ? withInsider.filter((c) => passesExplicitChecks(c, requirements, institutionalBySymbol, congressionalBySymbol))
+      : withInsider;
+    // `rest` (everything beyond the 14 semifinalists) never went through
+    // Stage 3 enrichment at all — no sf, no insiderActivity, no convergence
+    // data — so it's structurally impossible to verify any of these against
+    // it. Letting it through unfiltered would silently undermine the whole
+    // point of an explicit ask (a real, checked guarantee), since an
+    // unverified long-tail candidate could still win a spot in the final
+    // ranking purely because nothing ever excluded it.
+    const restAfterExplicitChecks = hasExplicitCheckRequirement ? [] : rest;
 
     // Real signals nudge the final ranking rather than overriding the
     // fundamentals score outright — compositeScore itself stays a pure
@@ -1457,7 +1535,7 @@ export async function runScreener(
       // actually known. thinCoverage candidates are excluded outright —
       // a "disagreement" on a data-starved read isn't a real signal.
       const MIN_DIVERGENCE = 20;
-      const withDivergence = withInsider
+      const withDivergence = explicitlyFiltered
         .filter((c) => c.analystUpsidePct !== undefined && c.ottoUpsidePct !== undefined && !c.thinCoverage)
         .map((c) => ({ c, divergence: c.ottoUpsidePct! - c.analystUpsidePct! }))
         .filter((x) => Math.abs(x.divergence) >= MIN_DIVERGENCE)
@@ -1480,7 +1558,7 @@ export async function runScreener(
         };
       });
     } else {
-      const rankedFinalists = [...withInsider, ...rest]
+      const rankedFinalists = [...explicitlyFiltered, ...restAfterExplicitChecks]
         .filter((c) => meetsBar(c, rankKey(c)))
         .sort((a, b) => {
           if (a.thinCoverage !== b.thinCoverage) return a.thinCoverage ? 1 : -1;
