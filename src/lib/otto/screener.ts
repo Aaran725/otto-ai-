@@ -31,6 +31,7 @@ import type { ScreenQueryRequirements } from "./screen-query";
 import { computeValueScore } from "./value-score";
 import { computeForecastTargets } from "./forecast";
 import { logScreenerCall, getKilledFactors } from "./screener-track-record";
+import { logBenchmarkCall } from "./screener-benchmark";
 import { selectVariant, BEST_VARIANT_WEIGHTS, type BestVariant } from "./bandit";
 
 export type ScreenIntent = "undervalued" | "momentum" | "best" | "quality" | "avoid" | "contrarian";
@@ -901,6 +902,34 @@ export async function runScreener(
     const SEMIFINALIST_COUNT = 14;
     const semifinalists = ranked.slice(0, SEMIFINALIST_COUNT);
     const rest = ranked.slice(SEMIFINALIST_COUNT);
+
+    // Phase L "dumb-money arena" — logged at this exact point, from this
+    // exact pool, so it can never drift out of sync with what Otto's own
+    // ranking actually saw this scan. A genuine random 5 (proper
+    // Fisher-Yates, not a naive sort-comparator shuffle) plus all 14
+    // semifinalists tagged as the equal-weight basket — see
+    // screener-benchmark.ts for why averaging 14 individually-evaluated
+    // alphas IS the real basket alpha, no separate basket math needed.
+    // Awaited (like logScreenerCall below) rather than fire-and-forget —
+    // a serverless function can be frozen right after it returns a
+    // response, so unawaited work here isn't guaranteed to actually finish
+    // writing to Redis. Run concurrently among themselves, though: unlike
+    // logScreenerCall's real picks, there's no shared cash pool here to
+    // race on.
+    const shuffled = [...semifinalists];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    const randomFive = shuffled.slice(0, 5);
+    await Promise.all([
+      ...randomFive.map((c) =>
+        logBenchmarkCall({ benchmark: "random", intent, symbol: c.symbol, companyName: c.companyName, price: c.price })
+      ),
+      ...semifinalists.map((c) =>
+        logBenchmarkCall({ benchmark: "equalWeight", intent, symbol: c.symbol, companyName: c.companyName, price: c.price })
+      ),
+    ]);
     onProgress?.({
       id: "crosscheck",
       text: `Cross-checking insider trades, analyst tone, and sector valuation on ${semifinalists.length} finalists…`,

@@ -11,6 +11,12 @@ import { ReturnGauge } from "@/components/otto/ReturnGauge";
 import { FactorAlphaBars, type FactorAlphaBarDatum } from "@/components/otto/FactorAlphaBars";
 import { getBanditStatus } from "@/lib/otto/bandit";
 import { PortfolioCompositionDonut, type CompositionDatum } from "@/components/otto/PortfolioCompositionDonut";
+import { getBenchmarkSummary } from "@/lib/otto/screener-benchmark";
+
+const BENCHMARK_LABELS: Record<string, string> = {
+  random: "Random 5 (drawn from the same semifinalist pool)",
+  equalWeight: "Equal-weight all 14 semifinalists",
+};
 
 const NUDGE_TYPE_LABELS: Record<string, string> = {
   cluster: "Insider cluster (market-wide)",
@@ -82,7 +88,7 @@ export default async function ScreenerTrackRecordPage({
     );
   }
 
-  const [calls, portfolio, shortBook, flagship, factorContributions, killedFactors, banditStatus] = await Promise.all([
+  const [calls, portfolio, shortBook, flagship, factorContributions, killedFactors, banditStatus, benchmark] = await Promise.all([
     getScreenerCallsWithLiveMarks(),
     getPortfolioSummary(),
     getShortBookSummary(),
@@ -90,6 +96,7 @@ export default async function ScreenerTrackRecordPage({
     getFactorContributions(),
     getKilledFactors(),
     getBanditStatus(),
+    getBenchmarkSummary(),
   ]);
   calls.sort((a, b) => new Date(b.calledAt).getTime() - new Date(a.calledAt).getTime());
   const flagshipAlpha = flagship.avgLiveAlphaPct ?? flagship.avgD30AlphaPct ?? flagship.avgD90AlphaPct ?? flagship.avgD180AlphaPct;
@@ -272,6 +279,45 @@ export default async function ScreenerTrackRecordPage({
               </div>
             );
           })}
+        </div>
+      </div>
+
+      <div className="mt-6">
+        <h2 className="otto-text-label text-otto-text-faint">Real picks vs. dumb money</h2>
+        <p className="otto-text-caption mt-1 text-otto-text-faint">
+          Every scan also logs a real random 5-stock draw and all 14 semifinalists as an equal-weight basket — the exact
+          same pool Otto&apos;s own ranking saw, notionally tracked (no simulated capital at stake) through the same real
+          30-day alpha vs. SPY. This is the actual answer to &quot;are the real picks any better than picking randomly,&quot;
+          not just an assurance.
+        </p>
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="rounded-xl border border-otto-gold/30 bg-otto-gold/[0.04] p-4">
+            <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-gold">Otto&apos;s real picks</div>
+            {benchmark.realPicks.sampleSize === 0 ? (
+              <div className="mt-1 text-sm text-otto-text-faint">Not enough data yet</div>
+            ) : (
+              <div className={`tabular-nums mt-1 text-lg font-semibold ${benchmark.realPicks.avgAlphaPct >= 0 ? "text-otto-bull" : "text-otto-bear"}`}>
+                {fmtPct(benchmark.realPicks.avgAlphaPct)}{" "}
+                <span className="text-xs font-normal text-otto-text-faint">(n={benchmark.realPicks.sampleSize})</span>
+              </div>
+            )}
+            <p className="otto-text-caption mt-1 text-otto-text-faint">Avg 30d alpha vs. SPY, all logged intents blended</p>
+          </div>
+          {benchmark.benchmarks.map((b) => (
+            <div key={b.benchmark} className="rounded-xl border border-otto-border-soft bg-white/[0.02] p-4">
+              <div className="otto-text-caption text-[10px] uppercase tracking-wide text-otto-text-faint">
+                {BENCHMARK_LABELS[b.benchmark] ?? b.benchmark}
+              </div>
+              {b.sampleSize === 0 ? (
+                <div className="mt-1 text-sm text-otto-text-faint">Not enough data yet</div>
+              ) : (
+                <div className={`tabular-nums mt-1 text-lg font-semibold ${b.avgAlphaPct >= 0 ? "text-otto-bull" : "text-otto-bear"}`}>
+                  {fmtPct(b.avgAlphaPct)} <span className="text-xs font-normal text-otto-text-faint">(n={b.sampleSize})</span>
+                </div>
+              )}
+              <p className="otto-text-caption mt-1 text-otto-text-faint">Avg 30d alpha vs. SPY</p>
+            </div>
+          ))}
         </div>
       </div>
 

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { evaluateDueScreenerCalls, updateDailyPeaks, evaluateFactorKillSwitch } from "@/lib/otto/screener-track-record";
+import { evaluateDueBenchmarkCalls } from "@/lib/otto/screener-benchmark";
 
 /**
  * Cron target (see vercel.json) — daily sweep that (1) evaluates any
@@ -32,6 +33,13 @@ import { evaluateDueScreenerCalls, updateDailyPeaks, evaluateFactorKillSwitch } 
  * most days) — not something a synthetic test happened to trigger by
  * chance. Sequenced below on purpose; evaluateFactorKillSwitch never
  * touches an individual call record, so it stays safely parallel.
+ *
+ * evaluateDueBenchmarkCalls (Phase L, screener-benchmark.ts) runs in the
+ * same parallel group as evaluateFactorKillSwitch below, not sequenced
+ * with the two above — it reads/writes an entirely separate Redis
+ * namespace (otto:benchmark:*, never PORTFOLIO_KEY or a real call
+ * record), so it can't race with updateDailyPeaks/evaluateDueScreenerCalls
+ * the way those two race with each other.
  */
 export const maxDuration = 60;
 
@@ -43,7 +51,11 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Not authorized" }, { status: 401 });
     }
   }
-  const [peaks, factorKillSwitch] = await Promise.all([updateDailyPeaks(), evaluateFactorKillSwitch()]);
+  const [peaks, factorKillSwitch, benchmarkEvaluation] = await Promise.all([
+    updateDailyPeaks(),
+    evaluateFactorKillSwitch(),
+    evaluateDueBenchmarkCalls(),
+  ]);
   const evaluation = await evaluateDueScreenerCalls();
-  return NextResponse.json({ evaluation, peaks, factorKillSwitch });
+  return NextResponse.json({ evaluation, peaks, factorKillSwitch, benchmarkEvaluation });
 }

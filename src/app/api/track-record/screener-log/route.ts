@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getScreenerCallsWithLiveMarks, getPortfolioSummary, getFlagshipSummary } from "@/lib/otto/screener-track-record";
+import { getBenchmarkSummary } from "@/lib/otto/screener-benchmark";
 
 /**
  * Private-only viewer for the permanent screener track record (Phase 1b) —
@@ -24,11 +25,12 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Not authorized" }, { status: 401 });
     }
   }
-  const [calls, portfolio, flagship] = await Promise.all([
+  const [calls, portfolio, flagship, benchmark] = await Promise.all([
     getScreenerCallsWithLiveMarks(),
     getPortfolioSummary(),
     getFlagshipSummary(),
+    getBenchmarkSummary(),
   ]);
   calls.sort((a, b) => new Date(b.calledAt).getTime() - new Date(a.calledAt).getTime());
-  return NextResponse.json({ count: calls.length, calls, portfolio, flagship });
+  return NextResponse.json({ count: calls.length, calls, portfolio, flagship, benchmark });
 }
