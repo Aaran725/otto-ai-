@@ -8,6 +8,7 @@ import type { CatalystEvent } from "./catalyst-bus";
 import type { SegmentAnalysis } from "./segments";
 import type { GovernmentContractSignal } from "./usaspending";
 import type { InstitutionalConvergence } from "./sec-13f";
+import type { CongressionalConvergence } from "./house-stock-act";
 
 export type Verdict = "Strong Buy" | "Buy" | "Hold" | "Avoid" | "Strong Avoid";
 
@@ -202,6 +203,13 @@ export interface OttoAnalysis {
    * least a quarter-plus-45-days old (real 13F filing lag) — see
    * sec-13f.ts. */
   institutionalConvergence: InstitutionalConvergence | null;
+  /** Real US House STOCK Act disclosure convergence: how many different
+   * representatives each independently disclosed a real purchase of this
+   * ticker in the last 45 days (house-stock-act.ts). House-only — Senate
+   * coverage is a confirmed-live technical wall (Akamai bot protection).
+   * Never a "rep X bought it" copy signal, only real independent
+   * agreement. Null for the overwhelming majority of tickers. */
+  congressionalConvergence: CongressionalConvergence | null;
   generatedAt: string; // ISO timestamp
   dataQuality: DataQuality;
   /** Explains a real screener-vs-conviction divergence when one exists,

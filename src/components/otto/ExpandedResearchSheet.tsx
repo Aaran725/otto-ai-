@@ -18,6 +18,7 @@ import { RevenueMarginChart } from "./RevenueMarginChart";
 import { SegmentBreakdown } from "./SegmentBreakdown";
 import { GovernmentContractPanel } from "./GovernmentContractPanel";
 import { InstitutionalConvergencePanel } from "./InstitutionalConvergencePanel";
+import { CongressionalConvergencePanel } from "./CongressionalConvergencePanel";
 import { CashFlowWaterfall } from "./CashFlowWaterfall";
 import { InsiderTimeline } from "./InsiderTimeline";
 import { CandlestickChart } from "./CandlestickChart";
@@ -247,6 +248,11 @@ export function ExpandedResearchSheet({
             {analysis.institutionalConvergence && (
               <div className="border-t border-otto-border-soft pt-5">
                 <InstitutionalConvergencePanel signal={analysis.institutionalConvergence} />
+              </div>
+            )}
+            {analysis.congressionalConvergence && (
+              <div className="border-t border-otto-border-soft pt-5">
+                <CongressionalConvergencePanel signal={analysis.congressionalConvergence} />
               </div>
             )}
             <div className="border-t border-otto-border-soft pt-5">
