@@ -112,6 +112,64 @@ export function computeAltmanZScore(inputs: {
 }
 
 /**
+ * The real, standard Beneish M-Score (1999) — an 8-variable composite built
+ * to flag likely earnings manipulation, not an invented metric. The third
+ * pillar Round 1's research named (Piotroski, Altman Z, Beneish) alongside
+ * the two already built above. Needs two consecutive real fiscal years
+ * (the balance-sheet fetch was widened from 1 to 5 years specifically to
+ * unlock this) since every sub-index is a YoY ratio-of-ratios: DSRI
+ * (receivables growing faster than sales — channel-stuffing risk), GMI
+ * (deteriorating gross margin, a motive to manipulate), AQI (soft-asset
+ * growth outpacing hard assets), SGI (rapid sales growth — the single
+ * strongest real predictor in the original research), DEPI (slowing
+ * depreciation — inflates earnings), SGAI (disproportionate SG&A growth),
+ * TATA (accruals a real cash-flow check doesn't back up), LVGI (rising
+ * leverage). M > -1.78 is the real, published threshold flagging likely
+ * manipulation — not an invented cutoff. Returns null (never a fabricated
+ * number) when any sub-index divides by a real zero. Pure, exported for
+ * direct testing with real company figures.
+ */
+export interface BeneishPeriod {
+  receivables: number;
+  sales: number;
+  costOfRevenue: number;
+  currentAssets: number;
+  ppe: number;
+  totalAssets: number;
+  depreciation: number;
+  sga: number;
+  longTermDebt: number;
+  currentLiabilities: number;
+}
+
+export function computeBeneishMScore(
+  latest: BeneishPeriod & { netIncome: number; operatingCashFlow: number },
+  prior: BeneishPeriod
+): number | null {
+  if (latest.sales <= 0 || prior.sales <= 0 || latest.totalAssets <= 0 || prior.totalAssets <= 0) return null;
+
+  const dsri = (latest.receivables / latest.sales) / (prior.receivables / prior.sales);
+  const gmi =
+    (prior.sales - prior.costOfRevenue) / prior.sales / ((latest.sales - latest.costOfRevenue) / latest.sales);
+  const aqi =
+    (1 - (prior.currentAssets + prior.ppe) / prior.totalAssets) /
+    (1 - (latest.currentAssets + latest.ppe) / latest.totalAssets);
+  const sgi = latest.sales / prior.sales;
+  const depi =
+    (prior.depreciation / (prior.ppe + prior.depreciation)) /
+    (latest.depreciation / (latest.ppe + latest.depreciation));
+  const sgai = (latest.sga / latest.sales) / (prior.sga / prior.sales);
+  const lvgi =
+    ((latest.longTermDebt + latest.currentLiabilities) / latest.totalAssets) /
+    ((prior.longTermDebt + prior.currentLiabilities) / prior.totalAssets);
+  const tata = (latest.netIncome - latest.operatingCashFlow) / latest.totalAssets;
+
+  const m =
+    -4.84 + 0.92 * dsri + 0.528 * gmi + 0.404 * aqi + 0.892 * sgi + 0.115 * depi - 0.172 * sgai + 4.679 * tata - 0.327 * lvgi;
+  return Number.isFinite(m) ? m : null;
+}
+
+/**
  * All five axes are scored from fixed absolute thresholds against real FMP
  * data — no LLM involved. This mirrors Simply Wall St's pass/fail-check
  * methodology: reproducible, explainable, can't hallucinate a number. Every
@@ -165,6 +223,8 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
   const latestCashFlow = cashFlow.at(-1);
   const priorCashFlow = cashFlow.at(-2);
   const oldestIncome = income[0];
+  const latestBalanceSheet = balanceSheet.at(-1);
+  const priorBalanceSheet = balanceSheet.at(-2);
 
   // Fall back to ratios.revenueGrowthYoY (Finnhub) when FMP's income
   // statement is blocked for this ticker.
@@ -265,6 +325,66 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
     keyMetrics?.returnOnEquity !== undefined ? { label: "ROE above 15%", passed: keyMetrics.returnOnEquity > 0.15 } : null
   );
   if (roeCheck) qualityChecks.push(roeCheck);
+  // Real Beneish M-Score — FMP-primary-path only, same documented
+  // limitation as Altman Z below (balanceSheet isn't populated on the
+  // screener's Finnhub-sourced bundle). Every field it needs already
+  // exists on income/balanceSheet; this just checks they're all actually
+  // present for both of the two most recent real fiscal years before
+  // computing anything.
+  if (
+    latestBalanceSheet &&
+    priorBalanceSheet &&
+    latestIncome &&
+    priorIncome &&
+    latestCashFlow?.operatingCashFlow !== undefined &&
+    latestIncome.costOfRevenue !== undefined &&
+    priorIncome.costOfRevenue !== undefined &&
+    latestIncome.sellingGeneralAndAdministrativeExpenses !== undefined &&
+    priorIncome.sellingGeneralAndAdministrativeExpenses !== undefined &&
+    latestIncome.depreciationAndAmortization !== undefined &&
+    priorIncome.depreciationAndAmortization !== undefined &&
+    latestBalanceSheet.netReceivables !== undefined &&
+    priorBalanceSheet.netReceivables !== undefined &&
+    latestBalanceSheet.propertyPlantEquipmentNet !== undefined &&
+    priorBalanceSheet.propertyPlantEquipmentNet !== undefined &&
+    latestBalanceSheet.longTermDebt !== undefined &&
+    priorBalanceSheet.longTermDebt !== undefined
+  ) {
+    const m = computeBeneishMScore(
+      {
+        receivables: latestBalanceSheet.netReceivables,
+        sales: latestIncome.revenue,
+        costOfRevenue: latestIncome.costOfRevenue,
+        currentAssets: latestBalanceSheet.totalCurrentAssets,
+        ppe: latestBalanceSheet.propertyPlantEquipmentNet,
+        totalAssets: latestBalanceSheet.totalAssets,
+        depreciation: latestIncome.depreciationAndAmortization,
+        sga: latestIncome.sellingGeneralAndAdministrativeExpenses,
+        longTermDebt: latestBalanceSheet.longTermDebt,
+        currentLiabilities: latestBalanceSheet.totalCurrentLiabilities,
+        netIncome: latestIncome.netIncome,
+        operatingCashFlow: latestCashFlow.operatingCashFlow,
+      },
+      {
+        receivables: priorBalanceSheet.netReceivables,
+        sales: priorIncome.revenue,
+        costOfRevenue: priorIncome.costOfRevenue,
+        currentAssets: priorBalanceSheet.totalCurrentAssets,
+        ppe: priorBalanceSheet.propertyPlantEquipmentNet,
+        totalAssets: priorBalanceSheet.totalAssets,
+        depreciation: priorIncome.depreciationAndAmortization,
+        sga: priorIncome.sellingGeneralAndAdministrativeExpenses,
+        longTermDebt: priorBalanceSheet.longTermDebt,
+        currentLiabilities: priorBalanceSheet.totalCurrentLiabilities,
+      }
+    );
+    if (m !== null) {
+      qualityChecks.push({
+        label: `Beneish M-Score (${m.toFixed(2)}) shows no signs of earnings manipulation`,
+        passed: m < -1.78,
+      });
+    }
+  }
   const quality = axis(qualityChecks);
 
   const financialHealthChecks: SnowflakeCheck[] = [];
@@ -289,7 +409,6 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
   // Real Altman Z-Score — currently FMP-primary-path only, since
   // balanceSheet is only populated there (see StockBundle's own comment);
   // the screener's Finnhub-sourced enrichment doesn't get this check yet.
-  const latestBalanceSheet = balanceSheet.at(-1);
   if (latestBalanceSheet && latestIncome?.ebit !== undefined && quote.marketCap > 0) {
     const z = computeAltmanZScore({
       totalAssets: latestBalanceSheet.totalAssets,

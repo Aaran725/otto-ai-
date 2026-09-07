@@ -508,7 +508,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 11; // v11: Phase I convergence bonus (v10) + fixed the real root cause of "same companies every day" — the candidate pool's seed was a hardcoded constant with zero rotation ever, now rotates by real calendar day
+const SCORING_VERSION = 12; // v12: Phase J real Beneish M-Score (quality axis) + fixed a latent balanceSheet ordering bug (never reversed like income/cashFlow, only harmless at limit:1 — now widened to 5 years for real YoY sub-indices)
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeSnowflake, computeAltmanZScore, compute12to1Momentum } from "../snowflake";
+import { computeSnowflake, computeAltmanZScore, computeBeneishMScore, compute12to1Momentum } from "../snowflake";
 import type { StockBundle } from "../fmp";
 import type { PeerValuation, PeerPercentiles } from "../peers";
 
@@ -399,6 +399,132 @@ describe("computeAltmanZScore — the real, standard 1968 formula", () => {
 
     const withoutBalanceSheet = computeSnowflake(emptyBundle());
     expect(withoutBalanceSheet.financialHealth.checks.some((c) => c.label.includes("Altman Z-Score"))).toBe(false);
+  });
+});
+
+describe("computeBeneishMScore — the real, standard 1999 formula", () => {
+  it("scores a synthetic, clearly-healthy two-year profile (stable margins, receivables/sales in lockstep, CFO exceeds net income) as no manipulation signal", () => {
+    // Synthetic, not pulled-live figures (unlike the Altman Z tests above) —
+    // every sub-index is deliberately close to 1 (no YoY distortion) except
+    // modest real growth and CFO genuinely exceeding net income, which is
+    // exactly the profile a non-manipulating company should show.
+    const m = computeBeneishMScore(
+      {
+        receivables: 105,
+        sales: 1050,
+        costOfRevenue: 630,
+        currentAssets: 315,
+        ppe: 410,
+        totalAssets: 1050,
+        depreciation: 52,
+        sga: 157.5,
+        longTermDebt: 200,
+        currentLiabilities: 155,
+        netIncome: 100,
+        operatingCashFlow: 110,
+      },
+      {
+        receivables: 100,
+        sales: 1000,
+        costOfRevenue: 600,
+        currentAssets: 300,
+        ppe: 400,
+        totalAssets: 1000,
+        depreciation: 50,
+        sga: 150,
+        longTermDebt: 200,
+        currentLiabilities: 150,
+      }
+    );
+    expect(m).not.toBeNull();
+    expect(m!).toBeLessThan(-1.78); // real published "no manipulation" threshold
+  });
+
+  it("flags a synthetic manipulation profile (receivables outgrowing sales, shrinking margin, slowing depreciation, weak cash backing for reported profit)", () => {
+    const m = computeBeneishMScore(
+      {
+        receivables: 300, // growing 3x while sales only grew 1.5x
+        sales: 1500,
+        costOfRevenue: 1000, // gross margin fell from 40% to 33%
+        currentAssets: 600,
+        ppe: 420,
+        totalAssets: 1200, // soft assets (receivables/current assets) outpacing hard assets
+        depreciation: 30, // slowing relative to PP&E — inflates reported earnings
+        sga: 180,
+        longTermDebt: 200,
+        currentLiabilities: 200,
+        netIncome: 200,
+        operatingCashFlow: 50, // real cash lags reported profit by a wide margin
+      },
+      {
+        receivables: 100,
+        sales: 1000,
+        costOfRevenue: 600,
+        currentAssets: 300,
+        ppe: 400,
+        totalAssets: 1000,
+        depreciation: 50,
+        sga: 150,
+        longTermDebt: 200,
+        currentLiabilities: 150,
+      }
+    );
+    expect(m).not.toBeNull();
+    expect(m!).toBeGreaterThan(-1.78); // real published manipulation-flag threshold
+  });
+
+  it("returns null rather than a divide-by-zero result when a real sub-index denominator is zero", () => {
+    const zeroSalesPrior = {
+      receivables: 100,
+      sales: 0,
+      costOfRevenue: 0,
+      currentAssets: 300,
+      ppe: 400,
+      totalAssets: 1000,
+      depreciation: 50,
+      sga: 150,
+      longTermDebt: 200,
+      currentLiabilities: 150,
+    };
+    expect(
+      computeBeneishMScore(
+        {
+          receivables: 105,
+          sales: 1050,
+          costOfRevenue: 630,
+          currentAssets: 315,
+          ppe: 410,
+          totalAssets: 1050,
+          depreciation: 52,
+          sga: 157.5,
+          longTermDebt: 200,
+          currentLiabilities: 155,
+          netIncome: 100,
+          operatingCashFlow: 110,
+        },
+        zeroSalesPrior
+      )
+    ).toBeNull();
+  });
+
+  it("wires into computeSnowflake's quality axis only when two real consecutive fiscal years of both income and balance-sheet data exist", () => {
+    const withTwoYears = computeSnowflake(
+      emptyBundle({
+        income: [
+          { date: "2024-12-31", fiscalYear: "2024", revenue: 1000, netIncome: 90, costOfRevenue: 600, sellingGeneralAndAdministrativeExpenses: 150, depreciationAndAmortization: 50 },
+          { date: "2025-12-31", fiscalYear: "2025", revenue: 1050, netIncome: 100, costOfRevenue: 630, sellingGeneralAndAdministrativeExpenses: 157.5, depreciationAndAmortization: 52 },
+        ],
+        cashFlow: [{ date: "2025-12-31", fiscalYear: "2025", netIncome: 100, freeCashFlow: 80, operatingCashFlow: 110 }],
+        balanceSheet: [
+          { date: "2024-12-31", fiscalYear: "2024", totalAssets: 1000, totalCurrentAssets: 300, totalCurrentLiabilities: 150, totalLiabilities: 350, retainedEarnings: 0, netReceivables: 100, propertyPlantEquipmentNet: 400, longTermDebt: 200 },
+          { date: "2025-12-31", fiscalYear: "2025", totalAssets: 1050, totalCurrentAssets: 315, totalCurrentLiabilities: 155, totalLiabilities: 355, retainedEarnings: 0, netReceivables: 105, propertyPlantEquipmentNet: 410, longTermDebt: 200 },
+        ],
+      })
+    );
+    expect(withTwoYears.quality.checks.some((c) => c.label.includes("Beneish M-Score"))).toBe(true);
+
+    const withoutSecondYear = computeSnowflake(emptyBundle());
+    expect(withoutSecondYear.quality.checks.some((c) => c.label.includes("Beneish M-Score"))).toBe(false);
   });
 });
 
