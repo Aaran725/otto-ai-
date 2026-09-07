@@ -316,6 +316,28 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
       passed: latestIncome.sharesOutstanding <= priorIncome.sharesOutstanding * 1.02, // 2% slack for routine RSU vesting
     });
   }
+  // Piotroski's operating-efficiency pair (ΔMargin, ΔAsset Turnover) — the
+  // last 2 of the real 9 checks Otto was missing (Round 5, Phase N). Both
+  // read fields Phase J's balance-sheet widening already put on the bundle
+  // for Beneish: costOfRevenue (income) and totalAssets (balance sheet),
+  // just never read for this purpose before. Same FMP-primary-only
+  // limitation as Altman Z/Beneish — the Finnhub-fallback path never
+  // extracted costOfRevenue, so this won't fire there.
+  if (
+    latestIncome?.costOfRevenue !== undefined &&
+    priorIncome?.costOfRevenue !== undefined &&
+    latestIncome.revenue !== 0 &&
+    priorIncome.revenue !== 0
+  ) {
+    const grossMarginLatest = (latestIncome.revenue - latestIncome.costOfRevenue) / latestIncome.revenue;
+    const grossMarginPrior = (priorIncome.revenue - priorIncome.costOfRevenue) / priorIncome.revenue;
+    growthChecks.push({ label: "Gross margin improving YoY", passed: grossMarginLatest > grossMarginPrior });
+  }
+  if (latestIncome && priorIncome && latestBalanceSheet && priorBalanceSheet && priorBalanceSheet.totalAssets > 0 && latestBalanceSheet.totalAssets > 0) {
+    const assetTurnoverLatest = latestIncome.revenue / latestBalanceSheet.totalAssets;
+    const assetTurnoverPrior = priorIncome.revenue / priorBalanceSheet.totalAssets;
+    growthChecks.push({ label: "Asset turnover improving YoY", passed: assetTurnoverLatest > assetTurnoverPrior });
+  }
   const growth = axis(growthChecks);
 
   const qualityChecks: SnowflakeCheck[] = [];
@@ -456,6 +478,31 @@ export function computeSnowflake(bundle: StockBundle, peerValuation?: PeerValuat
     if (z !== null) {
       financialHealthChecks.push({ label: `Altman Z-Score (${z.toFixed(2)}) signals low bankruptcy risk`, passed: z > 1.81 });
     }
+  }
+  // Piotroski's leverage/liquidity pair (Round 5, Phase N) — real
+  // balance-sheet-health signals, so they live here alongside Altman Z
+  // rather than in growthChecks with the other Piotroski checks (a more
+  // honest axis fit than forcing every Piotroski signal into one axis).
+  // Both read the same latestBalanceSheet/priorBalanceSheet Altman Z uses.
+  if (
+    latestBalanceSheet?.longTermDebt !== undefined &&
+    priorBalanceSheet?.longTermDebt !== undefined &&
+    latestBalanceSheet.totalAssets > 0 &&
+    priorBalanceSheet.totalAssets > 0
+  ) {
+    const leverageLatest = latestBalanceSheet.longTermDebt / latestBalanceSheet.totalAssets;
+    const leveragePrior = priorBalanceSheet.longTermDebt / priorBalanceSheet.totalAssets;
+    financialHealthChecks.push({ label: "Long-term leverage decreasing YoY", passed: leverageLatest < leveragePrior });
+  }
+  if (
+    latestBalanceSheet &&
+    priorBalanceSheet &&
+    latestBalanceSheet.totalCurrentLiabilities !== 0 &&
+    priorBalanceSheet.totalCurrentLiabilities !== 0
+  ) {
+    const currentRatioLatest = latestBalanceSheet.totalCurrentAssets / latestBalanceSheet.totalCurrentLiabilities;
+    const currentRatioPrior = priorBalanceSheet.totalCurrentAssets / priorBalanceSheet.totalCurrentLiabilities;
+    financialHealthChecks.push({ label: "Current ratio (liquidity) improving YoY", passed: currentRatioLatest > currentRatioPrior });
   }
   const financialHealth = axis(financialHealthChecks);
 

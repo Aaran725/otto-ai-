@@ -268,6 +268,62 @@ describe("computeSnowflake — growth axis", () => {
     expect(sf.growth.checks.find((c) => c.label.includes("Cash flow backs up"))).toBeUndefined();
     expect(sf.growth.checks.find((c) => c.label.includes("dilution"))).toBeUndefined();
   });
+
+  it("Piotroski gross-margin check: passes when gross margin genuinely widened YoY", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        income: [
+          { date: "2024-12-31", fiscalYear: "2024", revenue: 100, netIncome: 10, costOfRevenue: 60 }, // 40% GM
+          { date: "2025-12-31", fiscalYear: "2025", revenue: 110, netIncome: 12, costOfRevenue: 60.5 }, // ~45% GM
+        ],
+      })
+    );
+    expect(sf.growth.checks.find((c) => c.label === "Gross margin improving YoY")?.passed).toBe(true);
+  });
+
+  it("Piotroski gross-margin check: fails when gross margin genuinely compressed YoY", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        income: [
+          { date: "2024-12-31", fiscalYear: "2024", revenue: 100, netIncome: 10, costOfRevenue: 60 }, // 40% GM
+          { date: "2025-12-31", fiscalYear: "2025", revenue: 110, netIncome: 5, costOfRevenue: 77 }, // 30% GM
+        ],
+      })
+    );
+    expect(sf.growth.checks.find((c) => c.label === "Gross margin improving YoY")?.passed).toBe(false);
+  });
+
+  it("Piotroski asset-turnover check: passes when revenue grew faster than the real asset base", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        income: [
+          { date: "2024-12-31", fiscalYear: "2024", revenue: 100, netIncome: 10 },
+          { date: "2025-12-31", fiscalYear: "2025", revenue: 130, netIncome: 13 },
+        ],
+        balanceSheet: [
+          { date: "2024-12-31", fiscalYear: "2024", totalAssets: 200, totalCurrentAssets: 80, totalCurrentLiabilities: 50, totalLiabilities: 100, retainedEarnings: 0 },
+          { date: "2025-12-31", fiscalYear: "2025", totalAssets: 200, totalCurrentAssets: 85, totalCurrentLiabilities: 52, totalLiabilities: 100, retainedEarnings: 0 },
+        ],
+      })
+    );
+    expect(sf.growth.checks.find((c) => c.label === "Asset turnover improving YoY")?.passed).toBe(true);
+  });
+
+  it("Piotroski asset-turnover check: fails when the real asset base grew faster than revenue", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        income: [
+          { date: "2024-12-31", fiscalYear: "2024", revenue: 100, netIncome: 10 },
+          { date: "2025-12-31", fiscalYear: "2025", revenue: 105, netIncome: 10 },
+        ],
+        balanceSheet: [
+          { date: "2024-12-31", fiscalYear: "2024", totalAssets: 200, totalCurrentAssets: 80, totalCurrentLiabilities: 50, totalLiabilities: 100, retainedEarnings: 0 },
+          { date: "2025-12-31", fiscalYear: "2025", totalAssets: 300, totalCurrentAssets: 85, totalCurrentLiabilities: 52, totalLiabilities: 150, retainedEarnings: 0 },
+        ],
+      })
+    );
+    expect(sf.growth.checks.find((c) => c.label === "Asset turnover improving YoY")?.passed).toBe(false);
+  });
 });
 
 describe("computeSnowflake — momentum axis technicals fallback", () => {
@@ -399,6 +455,68 @@ describe("computeAltmanZScore — the real, standard 1968 formula", () => {
 
     const withoutBalanceSheet = computeSnowflake(emptyBundle());
     expect(withoutBalanceSheet.financialHealth.checks.some((c) => c.label.includes("Altman Z-Score"))).toBe(false);
+  });
+});
+
+describe("computeSnowflake — Piotroski's leverage/liquidity pair (Round 5, Phase N)", () => {
+  it("Long-term leverage check: passes when the real debt-to-assets ratio genuinely fell YoY", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        balanceSheet: [
+          { date: "2024-12-31", fiscalYear: "2024", totalAssets: 1000, totalCurrentAssets: 300, totalCurrentLiabilities: 150, totalLiabilities: 500, retainedEarnings: 0, longTermDebt: 400 },
+          { date: "2025-12-31", fiscalYear: "2025", totalAssets: 1000, totalCurrentAssets: 300, totalCurrentLiabilities: 150, totalLiabilities: 400, retainedEarnings: 0, longTermDebt: 300 },
+        ],
+      })
+    );
+    expect(sf.financialHealth.checks.find((c) => c.label === "Long-term leverage decreasing YoY")?.passed).toBe(true);
+  });
+
+  it("Long-term leverage check: fails when the real debt-to-assets ratio genuinely rose YoY", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        balanceSheet: [
+          { date: "2024-12-31", fiscalYear: "2024", totalAssets: 1000, totalCurrentAssets: 300, totalCurrentLiabilities: 150, totalLiabilities: 400, retainedEarnings: 0, longTermDebt: 300 },
+          { date: "2025-12-31", fiscalYear: "2025", totalAssets: 1000, totalCurrentAssets: 300, totalCurrentLiabilities: 150, totalLiabilities: 500, retainedEarnings: 0, longTermDebt: 400 },
+        ],
+      })
+    );
+    expect(sf.financialHealth.checks.find((c) => c.label === "Long-term leverage decreasing YoY")?.passed).toBe(false);
+  });
+
+  it("Long-term leverage check never appears when longTermDebt isn't reported for both years", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        balanceSheet: [
+          { date: "2024-12-31", fiscalYear: "2024", totalAssets: 1000, totalCurrentAssets: 300, totalCurrentLiabilities: 150, totalLiabilities: 400, retainedEarnings: 0 },
+          { date: "2025-12-31", fiscalYear: "2025", totalAssets: 1000, totalCurrentAssets: 300, totalCurrentLiabilities: 150, totalLiabilities: 500, retainedEarnings: 0, longTermDebt: 400 },
+        ],
+      })
+    );
+    expect(sf.financialHealth.checks.find((c) => c.label === "Long-term leverage decreasing YoY")).toBeUndefined();
+  });
+
+  it("Current ratio (liquidity) check: passes when real liquidity genuinely improved YoY", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        balanceSheet: [
+          { date: "2024-12-31", fiscalYear: "2024", totalAssets: 1000, totalCurrentAssets: 150, totalCurrentLiabilities: 150, totalLiabilities: 400, retainedEarnings: 0 }, // ratio 1.0
+          { date: "2025-12-31", fiscalYear: "2025", totalAssets: 1000, totalCurrentAssets: 225, totalCurrentLiabilities: 150, totalLiabilities: 400, retainedEarnings: 0 }, // ratio 1.5
+        ],
+      })
+    );
+    expect(sf.financialHealth.checks.find((c) => c.label === "Current ratio (liquidity) improving YoY")?.passed).toBe(true);
+  });
+
+  it("Current ratio (liquidity) check: fails when real liquidity genuinely worsened YoY", () => {
+    const sf = computeSnowflake(
+      emptyBundle({
+        balanceSheet: [
+          { date: "2024-12-31", fiscalYear: "2024", totalAssets: 1000, totalCurrentAssets: 225, totalCurrentLiabilities: 150, totalLiabilities: 400, retainedEarnings: 0 }, // ratio 1.5
+          { date: "2025-12-31", fiscalYear: "2025", totalAssets: 1000, totalCurrentAssets: 150, totalCurrentLiabilities: 150, totalLiabilities: 400, retainedEarnings: 0 }, // ratio 1.0
+        ],
+      })
+    );
+    expect(sf.financialHealth.checks.find((c) => c.label === "Current ratio (liquidity) improving YoY")?.passed).toBe(false);
   });
 });
 

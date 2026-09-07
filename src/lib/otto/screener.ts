@@ -509,7 +509,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 13; // v13: Phase K — convergence (13F/Congress) now reaches single-stock convictionScore via computedSignals, shared computeConvergence logic; screener's Finnhub-sourced semifinalist bundle now gets real balance-sheet data (Altman Z can fire there too) and a real market cap instead of a hardcoded 0
+const SCORING_VERSION = 14; // v14: Phase N — completed the real Piotroski F-Score's remaining 4 checks (ΔLeverage/ΔLiquidity in financialHealth, ΔMargin/ΔAsset-Turnover in growth), all zero-new-fetch reads of data Phase J's balance-sheet widening already produced
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
