@@ -184,7 +184,19 @@ async function fetchInfoTableForFiling(cik: string, accessionNumber: string): Pr
 export interface ManagerPositionChanges {
   managerName: string;
   latestFilingDate: string;
-  holdings: Map<string, { shares: number; priorShares: number; value: number }>;
+  // A plain Record, NOT a Map — confirmed live this actually matters, the
+  // same real bug class already found once this session
+  // (house-stock-act.ts's HouseBuyer map): this whole object is cached via
+  // TtlCache.getOrSet, which JSON.stringifies it for Redis, and
+  // JSON.stringify(new Map()) produces "{}" — every real entry silently
+  // discarded. On a cache MISS this was invisible (the caller gets the
+  // freshly-built in-memory Map straight back, never round-tripped), but
+  // any request that hits an already-cached manager entry got holdings
+  // back with real totalPortfolioValue but ZERO real holdings. Confirmed
+  // live: Pershing Square's own cached entry read back
+  // `holdings: {}, totalPortfolioValue: 13714299861` — the real dollar
+  // total survived (a plain number), the real holdings did not (a Map).
+  holdings: Record<string, { shares: number; priorShares: number; value: number }>;
   // Real sum of every position's value in the LATEST filing (Round 7,
   // Phase Z) — the denominator for a position's real % weight in this
   // manager's own disclosed book, which is what actually distinguishes a
@@ -208,10 +220,10 @@ async function fetchManagerPositionChanges(manager: { name: string; cik: string 
     ]);
     if (!latest) return null;
 
-    const holdings = new Map<string, { shares: number; priorShares: number; value: number }>();
+    const holdings: Record<string, { shares: number; priorShares: number; value: number }> = {};
     let totalPortfolioValue = 0;
     for (const [issuer, holding] of latest) {
-      holdings.set(issuer, { shares: holding.shares, priorShares: prior?.get(issuer)?.shares ?? 0, value: holding.value });
+      holdings[issuer] = { shares: holding.shares, priorShares: prior?.get(issuer)?.shares ?? 0, value: holding.value };
       totalPortfolioValue += holding.value;
     }
     return { managerName: manager.name, latestFilingDate: filings[0].filingDate, holdings, totalPortfolioValue };
@@ -290,7 +302,7 @@ export async function fetchInstitutionalConvergence(companyName: string): Promis
   let latestFilingDate = "";
   for (const result of results) {
     if (!result) continue;
-    const position = result.holdings.get(target);
+    const position = result.holdings[target];
     if (!position) continue;
 
     const increased = position.shares > position.priorShares;

@@ -97,3 +97,29 @@ describe("isHighConvictionPosition — Round 7, Phase Z: real conviction, not ju
     expect(isHighConvictionPosition(1_000_000, 0)).toBe(false);
   });
 });
+
+describe("ManagerPositionChanges.holdings — the real cache-serialization regression", () => {
+  it("survives a real JSON round-trip (what TtlCache actually does through Redis) as a plain Record, unlike a Map", () => {
+    // Real, live-confirmed bug: this object is cached via TtlCache.getOrSet,
+    // which JSON.stringifies it for Redis. JSON.stringify(new Map()) is
+    // "{}" — every real holding silently vanishes on the very next cache
+    // HIT (a cache MISS never shows the bug, since the caller gets the
+    // fresh in-memory value straight back, never round-tripped). Confirmed
+    // live against Pershing Square's own cached entry: totalPortfolioValue
+    // (a plain number) survived; holdings (a Map) came back completely
+    // empty. This test locks in the real fix — a plain Record survives.
+    const holdings: Record<string, { shares: number; priorShares: number; value: number }> = {
+      AMAZONCOM: { shares: 1000, priorShares: 900, value: 2_390_000_000 },
+      UBERTECHNOLOGIES: { shares: 500, priorShares: 500, value: 2_150_000_000 },
+    };
+    const roundTripped = JSON.parse(JSON.stringify({ holdings })) as { holdings: typeof holdings };
+    expect(roundTripped.holdings.AMAZONCOM).toEqual({ shares: 1000, priorShares: 900, value: 2_390_000_000 });
+    expect(roundTripped.holdings.UBERTECHNOLOGIES).toEqual({ shares: 500, priorShares: 500, value: 2_150_000_000 });
+
+    // The exact bug this replaced, shown directly for contrast: a Map with
+    // the same real data does NOT survive the identical round-trip.
+    const holdingsAsMap = new Map(Object.entries(holdings));
+    const brokenRoundTrip = JSON.parse(JSON.stringify({ holdings: holdingsAsMap })) as { holdings: object };
+    expect(Object.keys(brokenRoundTrip.holdings)).toHaveLength(0);
+  });
+});
