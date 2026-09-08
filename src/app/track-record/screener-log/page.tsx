@@ -28,6 +28,7 @@ const NUDGE_TYPE_LABELS: Record<string, string> = {
   earnings: "Earnings track record",
   shortInterest: "Short interest risk",
   convergence: "Real convergence (insider + 13F + Congress)",
+  highConviction: "High-conviction fund holding (13F, real concentrated bet)",
 };
 
 export const metadata = { title: "Otto's Track Record — every real pick, unedited" };

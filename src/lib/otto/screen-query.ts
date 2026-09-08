@@ -27,6 +27,13 @@ export interface ScreenQueryRequirements {
   stableMargins?: boolean; // the margin-stability check must not have failed
   noInsiderSelling?: boolean; // excludes only a candidate with CONFIRMED recent insider selling
   requiresRealConvergence?: boolean; // 2+ independent real buyers (insider/13F/Congress) must actually agree
+  // Round 7, Phase AA — real, concentrated, high-conviction 13F managers
+  // (Pershing Square/Ackman, Baupost/Klarman, Third Point/Loeb, etc. — see
+  // sec-13f.ts's CURATED_MANAGERS) hold this stock as a real >=5%-of-book
+  // position right now. A genuinely different, stronger ask than
+  // requiresRealConvergence — this is about ONE fund's real, concentrated
+  // bet, not several categories merely agreeing.
+  requiresHighConvictionFundHolding?: boolean;
 }
 
 export interface ScreenQuery {
@@ -47,7 +54,7 @@ const SYSTEM_PROMPT = `You classify a user's free-form stock-market request into
   "requirements": {
     "maxPE": number, "minRevenueGrowthPct": number, "minROICPct": number, "minFCFYieldPct": number,
     "noEarningsManipulationRisk": boolean, "noBankruptcyRisk": boolean, "stableMargins": boolean,
-    "noInsiderSelling": boolean, "requiresRealConvergence": boolean
+    "noInsiderSelling": boolean, "requiresRealConvergence": boolean, "requiresHighConvictionFundHolding": boolean
   } | null,
   "requiresInsiderBuying": boolean
 }
@@ -64,6 +71,7 @@ Rules:
   - "stableMargins": phrases like "stable margins", "consistent profitability", "not cyclical", "durable moat".
   - "noInsiderSelling": phrases like "no insider selling", "insiders aren't dumping", "management isn't selling" (distinct from "requiresInsiderBuying" below, which wants CONFIRMED buying — this one just excludes confirmed sellers).
   - "requiresRealConvergence": phrases like "real institutional buying", "smart money buying together", "insiders and funds both buying", "Congress and hedge funds both accumulating" — specifically MULTIPLE independent categories agreeing, not just one (a single "institutions are buying" alone doesn't need this field — only set it when the user wants that cross-category agreement specifically).
+  - "requiresHighConvictionFundHolding": phrases like "stocks funds like Ackman/Bill Ackman would buy", "a top holding for a hedge fund", "stocks a concentrated fund is betting big on", "what would Pershing Square/Warren Buffett/a value investor own", "stocks smart money has serious conviction in" — this is about ONE real fund holding the stock as a genuine, large, concentrated position (not merely "some institution owns a little of it," which doesn't need this field at all — only set it when the user's own words point at real conviction/betting big/a top position, not just generic institutional ownership).
   Use null for the whole "requirements" object if none of the numeric or boolean criteria were stated.
 - "minMarketCapMillions" only if the user gave an explicit cap floor beyond generic "mega cap" wording (e.g. "above $50 billion" -> 50000). Use null otherwise.
 - "requiresInsiderBuying" is true only if the user explicitly asked for stocks with insider buying / executives or insiders buying shares / insider accumulation (including misspellings like "inside rbuying"). Otherwise false.

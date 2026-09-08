@@ -50,7 +50,8 @@ export type NudgeType =
   | "forecastUpside"
   | "earnings"
   | "shortInterest"
-  | "convergence";
+  | "convergence"
+  | "highConviction";
 
 export interface ScreenerWhyNudge {
   type: NudgeType;
@@ -509,7 +510,7 @@ type SnowflakeAxis = keyof OttoSnowflakeScores;
  * logic on its next request, and old-version entries just age out on
  * their own TTL instead of needing a manual Redis flush.
  */
-const SCORING_VERSION = 16; // v16: Phase P — real gross-margin stability ("durable moat") check added to the quality axis, empirically-checked 0.05 coefficient-of-variation threshold against known stable/cyclical names
+const SCORING_VERSION = 17; // v17: Round 7 — 7 real concentrated/high-conviction managers (Pershing Square/Ackman, Baupost, Third Point, Appaloosa, Duquesne, Akre, Himalaya) added to 13F tracking, plus a real "highConviction" nudge (unconditional, applies to every scan) when a curated manager holds a >=5%-of-book position
 
 export const AXIS_WEIGHTS: Record<ScreenIntent, Partial<Record<SnowflakeAxis, number>>> = {
   undervalued: { valuation: 2, quality: 1, financialHealth: 1, growth: 0.5, momentum: 0.5 },
@@ -761,7 +762,8 @@ export function passesExplicitChecks(
   c: ScreenerCandidate,
   req: ScreenQueryRequirements | null,
   institutionalBySymbol: Map<string, boolean>,
-  congressionalBySymbol: Map<string, boolean>
+  congressionalBySymbol: Map<string, boolean>,
+  highConvictionBySymbol: Map<string, string[]> = new Map()
 ): boolean {
   if (!req) return true;
   if (req.noEarningsManipulationRisk && checkFailed(c.sf?.quality, "beneishMScore")) return false;
@@ -775,6 +777,14 @@ export function passesExplicitChecks(
       congressionalBuying: !!congressionalBySymbol.get(c.symbol),
     });
     if (!convergence) return false;
+  }
+  // Round 7, Phase AA — a real, named, concentrated fund (Pershing Square,
+  // Baupost, etc. — see sec-13f.ts) must hold this as a genuine >=5%-of-
+  // book position right now. Distinct from requiresRealConvergence: this
+  // is about ONE fund's real conviction, not several categories agreeing.
+  if (req.requiresHighConvictionFundHolding) {
+    const managers = highConvictionBySymbol.get(c.symbol);
+    if (!managers || managers.length === 0) return false;
   }
   return true;
 }
@@ -1017,6 +1027,11 @@ export async function runScreener(
     // same scan reads the warm result.
     const institutionalBySymbol = new Map<string, boolean>();
     const congressionalBySymbol = new Map<string, boolean>();
+    // Round 7, Phase Z — which real curated managers hold this stock as a
+    // >=5%-of-their-own-book position right now (see isHighConvictionPosition
+    // in sec-13f.ts). A genuinely different, stronger signal than
+    // institutionalBySymbol's binary "some manager's shares went up."
+    const highConvictionBySymbol = new Map<string, string[]>();
 
     const withInsider = await mapWithConcurrency(semifinalists, 4, async (candidate) => {
       const [
@@ -1080,6 +1095,9 @@ export async function runScreener(
       if (shortInterest) shortInterestBySymbol.set(candidate.symbol, shortInterest);
       if (institutionalConvergence && institutionalConvergence.increasedCount > 0) {
         institutionalBySymbol.set(candidate.symbol, true);
+      }
+      if (institutionalConvergence && institutionalConvergence.highConvictionManagers.length > 0) {
+        highConvictionBySymbol.set(candidate.symbol, institutionalConvergence.highConvictionManagers);
       }
       if (congressionalConvergence && congressionalConvergence.buyerCount > 0) {
         congressionalBySymbol.set(candidate.symbol, true);
@@ -1259,10 +1277,13 @@ export async function runScreener(
       requirements?.noBankruptcyRisk ||
       requirements?.stableMargins ||
       requirements?.noInsiderSelling ||
-      requirements?.requiresRealConvergence
+      requirements?.requiresRealConvergence ||
+      requirements?.requiresHighConvictionFundHolding
     );
     const explicitlyFiltered = requirements
-      ? withInsider.filter((c) => passesExplicitChecks(c, requirements, institutionalBySymbol, congressionalBySymbol))
+      ? withInsider.filter((c) =>
+          passesExplicitChecks(c, requirements, institutionalBySymbol, congressionalBySymbol, highConvictionBySymbol)
+        )
       : withInsider;
     // `rest` (everything beyond the 14 semifinalists) never went through
     // Stage 3 enrichment at all — no sf, no insiderActivity, no convergence
@@ -1327,6 +1348,13 @@ export async function runScreener(
     // stronger evidence than any one alone. Only fires on real agreement —
     // never fabricates convergence from one category counted twice.
     const CONVERGENCE_NUDGE_PER_EXTRA = 4;
+    // Round 7, Phase Z — deliberately modest, same order of magnitude as
+    // the other individual real-signal nudges (officer buying, rating
+    // trend) rather than a large bet-the-score add: 13F data is real, but
+    // research (see the mega plan's Phase E notes) is specific that even a
+    // real conviction signal like this is a supporting factor, not a
+    // "copy the fund" instruction.
+    const HIGH_CONVICTION_NUDGE = 5;
     // Derives from buildWhyNudges (defined below) rather than recomputing
     // the same nudges a second time — the two used to be independent,
     // hand-synced implementations of the same math (a real drift risk,
@@ -1440,6 +1468,26 @@ export async function runScreener(
           type: "convergence",
           label: `Real convergence: ${convergence.sources.join(" + ")} all buying independently`,
           points: (convergence.count - 1) * CONVERGENCE_NUDGE_PER_EXTRA,
+        });
+      }
+      // Real high-conviction holding (Round 7, Phase Z): a genuinely
+      // different, stronger signal than the convergence nudge above —
+      // convergence rewards BREADTH (2+ unrelated categories agreeing),
+      // this rewards DEPTH (a single named, concentrated fund has bet a
+      // real, large fraction of its own book on this one stock, right
+      // now — independent of whether it added to the position this
+      // quarter). Stacks on top of convergence, doesn't replace it: a
+      // stock can be both a top Pershing Square holding AND show
+      // independent insider buying, and that's stronger than either
+      // alone. Modest, same discipline as every other real nudge here —
+      // this names WHO, not just THAT, so it's never mistaken for a
+      // generic "institutions like this" ping.
+      const highConvictionManagers = highConvictionBySymbol.get(c.symbol);
+      if (highConvictionManagers && highConvictionManagers.length > 0) {
+        nudges.push({
+          type: "highConviction",
+          label: `Real high-conviction holding: ${highConvictionManagers.join(", ")} — a top position, not just a stake`,
+          points: HIGH_CONVICTION_NUDGE,
         });
       }
       // Fail-fast kill switch: a factor net-negative on real evaluated

@@ -229,6 +229,7 @@ export async function POST(request: Request) {
                 requirements?.stableMargins ? "stable margins" : null,
                 requirements?.noInsiderSelling ? "no confirmed insider selling" : null,
                 requirements?.requiresRealConvergence ? "real institutional/insider/congressional convergence" : null,
+                requirements?.requiresHighConvictionFundHolding ? "a real, concentrated top holding for a high-conviction fund" : null,
                 requireInsiderBuying ? "confirmed insider buying" : null,
               ].filter((l): l is string => l !== null);
               const reply =

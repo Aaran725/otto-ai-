@@ -140,4 +140,13 @@ describe("passesExplicitChecks — Round 6, Phase V: real search criteria drawn 
     // Nothing agrees.
     expect(passesExplicitChecks(baseCandidate(), req, none, none)).toBe(false);
   });
+
+  it("requiresHighConvictionFundHolding (Round 7, Phase AA): excludes unless a real curated manager holds it as a genuine top position", () => {
+    const req = { requiresHighConvictionFundHolding: true };
+    const withManager = new Map([["TEST", ["Pershing Square Capital Management"]]]);
+    const none = new Map<string, string[]>();
+    expect(passesExplicitChecks(baseCandidate(), req, ...noMaps, withManager)).toBe(true);
+    expect(passesExplicitChecks(baseCandidate(), req, ...noMaps, none)).toBe(false);
+    expect(passesExplicitChecks(baseCandidate(), req, ...noMaps)).toBe(false); // defaults to no high-conviction data at all
+  });
 });
