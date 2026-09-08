@@ -210,6 +210,15 @@ export interface OttoAnalysis {
    * Never a "rep X bought it" copy signal, only real independent
    * agreement. Null for the overwhelming majority of tickers. */
   congressionalConvergence: CongressionalConvergence | null;
+  /** Round 8, Phase EE — real, genuinely NEW risk factors this year's
+   * 10-K discloses that weren't in last year's, per a bounded LLM
+   * comparison of two real primary-source excerpts (never invented, never
+   * blended into scoring — see sec-edgar.ts's fetchRiskFactorExcerptPair
+   * and web-search.ts's own reasoning for why qualitative signals stay
+   * display-only). Null when the company doesn't have two real 10-Ks on
+   * file yet, or when nothing genuinely new was found — the common case
+   * for a stable, unremarkable filing year. */
+  newRiskFactors: string[] | null;
   generatedAt: string; // ISO timestamp
   dataQuality: DataQuality;
   /** Explains a real screener-vs-conviction divergence when one exists,

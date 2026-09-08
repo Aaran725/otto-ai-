@@ -8,7 +8,7 @@ import { computeSnowflake, computeConvergence, type OttoSnowflakeScores } from "
 import { computeForecastTargets } from "./forecast";
 import { computeMetrics } from "./metrics";
 import { summarizeBundleForPrompt } from "./summarize-bundle";
-import { fetchRiskFactorExcerpt } from "./sec-edgar";
+import { fetchRiskFactorExcerpt, fetchRiskFactorExcerptPair } from "./sec-edgar";
 import { fetchMacroContext } from "./fred";
 import { fetchFinnhubRecommendation, fetchFinnhubRatingTrend, type FinnhubRatingCounts } from "./finnhub";
 import { fetchYahooPriceTarget } from "./yahoo";
@@ -157,6 +157,44 @@ export async function withKeyRotation<T>(fn: (client: Groq) => Promise<T>): Prom
     }
   }
   throw lastError instanceof Error ? lastError : new Error("All Groq keys failed");
+}
+
+// Round 8, Phase EE — a real, narrow comparison of two real primary-source
+// excerpts, same "classify/compare real text, never fabricate" discipline
+// already established for screen-query.ts's classifier. Kept local to this
+// file (not system-prompt.ts) since it's a single-use, self-contained
+// prompt, same pattern screen-query.ts itself uses for its own prompt.
+const RISK_FACTOR_COMPARISON_PROMPT = `You compare two real excerpts from the SAME company's 10-K "Risk Factors" section — one from this year's real filing, one from last year's — and identify only genuinely NEW risks disclosed this year that were not present last year. Output strict JSON only:
+{ "newRisks": string[] }
+
+Rules:
+- Only include a risk that is SUBSTANTIVELY new — a real, different risk category or circumstance the company didn't disclose last year, not a reworded, reordered, or lightly-updated restatement of something already in last year's excerpt.
+- Each entry is a short (under 140 characters), specific, real risk grounded in THIS YEAR's excerpt's own actual language/topic — never invented, never a generic filler risk ("market risk", "competition") unless that specific topic is genuinely absent from last year's excerpt.
+- Return an empty array if nothing genuinely new is present — a stable, unremarkable filing year is the common, honest case. Do not force a result just to have something to say.
+- Never fabricate a risk that isn't grounded in the real text actually provided.`;
+
+async function compareRiskFactorExcerpts(latest: string, prior: string): Promise<string[] | null> {
+  try {
+    return await withKeyRotation(async (client) => {
+      const completion = await client.chat.completions.create({
+        model: ANALYSIS_MODEL,
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: RISK_FACTOR_COMPARISON_PROMPT },
+          { role: "user", content: `THIS YEAR'S real excerpt:\n${latest}\n\nLAST YEAR'S real excerpt:\n${prior}` },
+        ],
+      });
+      const content = completion.choices[0]?.message?.content;
+      if (!content) return null;
+      const parsed = JSON.parse(content) as { newRisks?: unknown };
+      if (!Array.isArray(parsed.newRisks)) return null;
+      const risks = parsed.newRisks.filter((r): r is string => typeof r === "string" && r.trim().length > 0);
+      return risks.length > 0 ? risks : null;
+    });
+  } catch {
+    return null;
+  }
 }
 
 /** Trims each axis down to its score + only the checks that failed, since
@@ -357,6 +395,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
     onProgress?.({ id: "shortinterest", text: "Checking short interest…", icon: "finnhub", tracksFinding: true });
     onProgress?.({ id: "insider", text: "Cross-referencing Form 4 insider filings…", icon: "sec", tracksFinding: true });
     onProgress?.({ id: "news", text: "Checking recent news…", icon: "finnhub", tracksFinding: true });
+    onProgress?.({ id: "riskchanges", text: "Comparing this year's disclosed risks to last year's…", icon: "sec", tracksFinding: true });
 
     // Enrichment only — never let a slow/failed fetch block the analysis.
     const [
@@ -373,6 +412,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       governmentContracts,
       institutionalConvergence,
       congressionalConvergence,
+      newRiskFactors,
     ] = await Promise.all([
       computeStreetConsensus(bundle, bundle.symbol)
         .catch(() => null)
@@ -488,6 +528,23 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       fetchGovernmentContractSignal(bundle.quote.name).catch(() => null),
       fetchInstitutionalConvergence(bundle.quote.name).catch(() => null),
       fetchCongressionalConvergence(bundle.symbol).catch(() => null),
+      // Round 8, Phase EE — never joins computedSignals below, same
+      // display-only discipline as recentNews above: an LLM-compared
+      // qualitative read of two real primary-source excerpts is real, but
+      // not the same kind of verifiable number as a real financial ratio.
+      fetchRiskFactorExcerptPair(bundle.profile?.cik)
+        .then((pair) => (pair ? compareRiskFactorExcerpts(pair.latest, pair.prior) : null))
+        .catch(() => null)
+        .then((r) => {
+          onProgress?.({
+            id: "riskchanges",
+            text: "Comparing this year's disclosed risks to last year's…",
+            finding: r && r.length > 0 ? `${r.length} new risk${r.length === 1 ? "" : "s"} found` : "No new risk factors found",
+            icon: "sec",
+            tracksFinding: true,
+          });
+          return r;
+        }),
     ]);
 
     const metrics = computeMetrics(bundle, peerValuation, earnings, shortInterest);
@@ -643,6 +700,7 @@ async function buildOttoAnalysis(ticker: string, bundle: StockBundle, onProgress
       governmentContracts,
       institutionalConvergence,
       congressionalConvergence,
+      newRiskFactors,
       dataQuality,
       historicalPrices: bundle.historicalMonthly.map((p) => ({
         date: p.date,

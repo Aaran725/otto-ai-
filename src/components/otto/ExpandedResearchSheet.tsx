@@ -255,6 +255,24 @@ export function ExpandedResearchSheet({
                 <CongressionalConvergencePanel signal={analysis.congressionalConvergence} />
               </div>
             )}
+            {analysis.newRiskFactors && analysis.newRiskFactors.length > 0 && (
+              <div className="border-t border-otto-border-soft pt-5">
+                <p className="mb-3 otto-text-label text-otto-text-faint">New This Year</p>
+                <p className="otto-text-caption mb-3 text-otto-text-faint">
+                  Real risks the company&apos;s own latest 10-K discloses that weren&apos;t in last year&apos;s filing.
+                </p>
+                <ul className="flex flex-col gap-2">
+                  {analysis.newRiskFactors.map((risk, i) => (
+                    <li
+                      key={i}
+                      className="rounded-lg border border-otto-bear/25 bg-otto-bear-soft px-4 py-3 text-xs text-otto-text-muted"
+                    >
+                      {risk}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="border-t border-otto-border-soft pt-5">
               <p className="mb-3 otto-text-label text-otto-text-faint">Cash Flow Bridge</p>
               <CashFlowWaterfall data={analysis.fundamentalTrend} />
