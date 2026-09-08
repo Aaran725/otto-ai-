@@ -112,6 +112,18 @@ export function OttoCardCompact({
         <p className="otto-text-body mt-4 line-clamp-2 text-otto-text-muted">
           {analysis.oneLiner}
         </p>
+        {/* Round 8, Phase DD — this is the FIRST place a real user actually
+            sees a score, so a genuine, real gap between a screener result
+            and this full analysis needs to be explained right here, not
+            only in the expanded sheet someone might never open. A real,
+            confirmed-live example: a stock screened at 95 and analyzed here
+            at 68 with no visible reason anywhere in this card. */}
+        {analysis.reconciliationNote && (
+          <p className="mt-2 line-clamp-2 rounded-lg border border-otto-gold/25 bg-otto-gold-soft px-3 py-2 text-xs text-otto-text-muted">
+            <span className="font-medium text-otto-gold">Score changed from the screen. </span>
+            {analysis.reconciliationNote}
+          </p>
+        )}
 
         <span className="mt-3 inline-block text-xs font-medium text-otto-gold opacity-0 transition-opacity group-hover:opacity-100">
           View full research →

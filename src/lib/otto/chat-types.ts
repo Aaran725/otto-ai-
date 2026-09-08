@@ -11,6 +11,7 @@ import type { PeerValuation } from "./peers";
 import type { InsiderActivity } from "./insider";
 import type { ScreenerWhyBreakdown, ScreenIntent } from "./screener";
 import type { TrackRecordSummary } from "./screener-track-record";
+import type { OttoSnowflakeScores } from "./snowflake";
 
 /** A small, targeted visual answering one follow-up question about a stock
  * already discussed — deliberately smaller than the full OttoCardCompact,
@@ -103,6 +104,17 @@ export interface ChatRequestBody {
   // its conviction score against the exact screen the user actually saw,
   // instead of always against a neutral "best"-weighted baseline.
   intentHint?: ScreenIntent;
+  // Round 8, Phase BB — the EXACT real compositeScore/sf the user is
+  // already looking at in the screener card they just clicked, passed
+  // straight through from the frontend's own in-memory state. Fixes a
+  // real, confirmed-live bug: the server-side reconciliation baseline
+  // (getCachedScreenerSnapshot) reads from a 45-minute-TTL cache while the
+  // screener's own result cache lives up to 4 hours (stale-while-
+  // revalidate can serve it even longer) — any click on a result older
+  // than 45 minutes silently produced NO reconciliation note at all,
+  // regardless of how large the real gap was. The client already has the
+  // real number; no cache lookup should ever be needed for this case.
+  screenerHint?: { compositeScore: number; sf: OttoSnowflakeScores };
 }
 
 export interface ChatResponseBody {

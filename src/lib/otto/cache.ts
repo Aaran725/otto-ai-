@@ -300,7 +300,20 @@ export function getSymbolScoreCache<T>(): TtlCache<T> {
   // not just within one — this is also what getCachedScreenerScore/
   // getCachedScreenerSnapshot read from for the reconciliation-note and
   // score-divergence checks.
-  globalForCache.__ottoSymbolScoreCache ??= new TtlCache("symbol-score", 45 * 60 * 1000); // 45 min
+  //
+  // Round 8, Phase CC — bumped from 45 min to match getScreenerCache's own
+  // 4h window (real, confirmed-live bug: a screener result can be shown to
+  // a user for up to 4h, longer still under that cache's stale-while-
+  // revalidate behavior, but this snapshot cache — the reconciliation
+  // note's data source — expired after only 45 min, so any click on a
+  // result older than 45 min silently produced NO reconciliation note at
+  // all). Doesn't make anything staler than the app already accepts: a
+  // cached screener response can already be serving up to 4h-old numbers,
+  // so matching this cache to that same real ceiling is an alignment, not
+  // a new tradeoff. Phase BB's client-passed score is the actually-robust
+  // fix for the common "click a card" path; this is defense-in-depth for
+  // paths without one (a stored link, a watchlist digest re-analysis).
+  globalForCache.__ottoSymbolScoreCache ??= new TtlCache("symbol-score", 4 * 60 * 60 * 1000); // 4 h
   return globalForCache.__ottoSymbolScoreCache as TtlCache<T>;
 }
 

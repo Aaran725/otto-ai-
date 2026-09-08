@@ -27,6 +27,7 @@ export async function POST(request: Request) {
   const message = body.message?.trim();
   const history = body.history ?? [];
   const intentHint = body.intentHint;
+  const screenerHint = body.screenerHint;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -78,7 +79,7 @@ export async function POST(request: Request) {
         async function runFreshAnalysis(resolved: ResolvedTicker) {
           const emit: ProgressFn = (update) => send({ type: "status", ...update });
           const bundle = await fetchStockBundle(resolved.symbol, emit);
-          const analysis = await runOttoAnalysis(resolved.symbol, bundle, emit, intentHint);
+          const analysis = await runOttoAnalysis(resolved.symbol, bundle, emit, intentHint, screenerHint);
           send({ type: "done", reply: analysis.oneLiner, card: analysis });
           closeOnce();
         }

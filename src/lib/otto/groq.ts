@@ -203,7 +203,8 @@ export async function runOttoAnalysis(
   ticker: string,
   bundle: StockBundle,
   onProgress?: ProgressFn,
-  intentHint?: ScreenIntent
+  intentHint?: ScreenIntent,
+  screenerHint?: { compositeScore: number; sf: OttoSnowflakeScores }
 ): Promise<OttoAnalysis> {
   const cacheKey = `${ticker}:${new Date().toISOString().slice(0, 10)}`;
   const cache = getAnalysisCache<OttoAnalysis>();
@@ -221,7 +222,17 @@ export async function runOttoAnalysis(
   // search would silently reuse a "best"-compared note even when this
   // request came from an "undervalued" screener click.
   const analysisSf = computeSnowflake(bundle);
-  const screenerSnap = await getCachedScreenerSnapshot(ticker, intentHint);
+  // Round 8, Phase BB — prefer the exact real score/breakdown the caller
+  // already has in hand (a screener-card click-through) over a fresh
+  // server-side cache lookup. Real, confirmed-live bug this closes:
+  // getCachedScreenerSnapshot reads from a 45-minute-TTL cache while the
+  // screener's own result cache lives up to 4 hours (longer still under
+  // stale-while-revalidate) — any click on a result older than 45 minutes
+  // silently produced NO reconciliation note at all, regardless of how
+  // large the real gap was, because the snapshot cache had already
+  // expired out from under it. The client-known score can't go stale this
+  // way — it's the literal number the user is looking at right now.
+  const screenerSnap = screenerHint ?? (await getCachedScreenerSnapshot(ticker, intentHint));
   const reconciliationNote = buildReconciliationNoteFromSnapshot(screenerSnap, analysis.convictionScore, analysisSf);
   if (screenerSnap && Math.abs(Math.round(analysis.convictionScore) - screenerSnap.compositeScore) > 25) {
     recordEvent("score_divergence", {

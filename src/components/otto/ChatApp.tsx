@@ -5,6 +5,7 @@ import Link from "next/link";
 import { clsx } from "clsx";
 import type { ChatMessage, ChatStreamEvent, ProgressUpdate, StageIcon } from "@/lib/otto/chat-types";
 import type { ScreenIntent } from "@/lib/otto/screener";
+import type { OttoSnowflakeScores } from "@/lib/otto/snowflake";
 import type { OttoAnalysis } from "@/lib/otto/schema";
 import { OttoCardCompact } from "./OttoCardCompact";
 import { MiniSparkline } from "./MiniSparkline";
@@ -115,7 +116,7 @@ export function ChatApp() {
     });
   }
 
-  async function send(text: string, intentHint?: ScreenIntent) {
+  async function send(text: string, intentHint?: ScreenIntent, screenerHint?: { compositeScore: number; sf: OttoSnowflakeScores }) {
     const trimmed = text.trim();
     if (!trimmed || pending) return;
 
@@ -140,7 +141,7 @@ export function ChatApp() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed, history: nextHistory, intentHint }),
+        body: JSON.stringify({ message: trimmed, history: nextHistory, intentHint, screenerHint }),
       });
       if (!res.body) throw new Error("Something went wrong");
 
@@ -396,7 +397,22 @@ export function ChatApp() {
                           </>
                         )}
                         {m.screener && (
-                          <ScreenerResultsCard screener={m.screener} onSelect={(symbol) => send(symbol, m.screener?.intent)} />
+                          <ScreenerResultsCard
+                            screener={m.screener}
+                            onSelect={(symbol) => {
+                              // Round 8, Phase BB — pass the EXACT real score/breakdown
+                              // already sitting in this card, not just the bare symbol,
+                              // so the single-stock analysis can reconcile against it
+                              // directly instead of a server-side cache that may have
+                              // already expired by the time this click happens.
+                              const result = m.screener?.results.find((r) => r.symbol === symbol);
+                              const screenerHint =
+                                result?.whyBreakdown && result.compositeScore !== undefined
+                                  ? { compositeScore: result.compositeScore, sf: result.whyBreakdown.sf }
+                                  : undefined;
+                              send(symbol, m.screener?.intent, screenerHint);
+                            }}
+                          />
                         )}
                       </>
                     )}
